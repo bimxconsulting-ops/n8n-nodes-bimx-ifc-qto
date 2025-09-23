@@ -1,20 +1,23 @@
 const fs = require("fs");
 const path = require("path");
 
-// Basis: Installationsordner vom Paket
-const pkgDir = path.dirname(require.resolve("web-ifc/package.json"));
+// 1) Den von Node aufgelösten Haupteinstieg von web-ifc finden
+const entry = require.resolve("web-ifc"); // z. B. .../node_modules/web-ifc/web-ifc-api.js
+const base = path.dirname(entry);
 
-// Mögliche Orte der WASM-Datei (je nach Version von web-ifc)
+// 2) Mögliche Orte der WASM-Datei (je nach web-ifc-Version / Build)
 const candidates = [
-  path.join(pkgDir, "web-ifc.wasm"),
-  path.join(pkgDir, "dist", "web-ifc.wasm"),
-  path.join(pkgDir, "lib", "web-ifc.wasm"),
+  path.join(base, "web-ifc.wasm"),
+  path.join(base, "dist", "web-ifc.wasm"),
+  path.join(base, "..", "web-ifc.wasm"),
+  path.join(base, "..", "dist", "web-ifc.wasm"),
+  path.join(base, "..", "lib", "web-ifc.wasm"),
 ];
 
 const src = candidates.find(p => fs.existsSync(p));
 if (!src) {
   throw new Error(
-    `web-ifc.wasm not found. Tried:\n - ${candidates.join("\n - ")}`
+    `web-ifc.wasm not found. Tried:\n - ${candidates.join("\n - ")}\nResolved entry: ${entry}`
   );
 }
 
