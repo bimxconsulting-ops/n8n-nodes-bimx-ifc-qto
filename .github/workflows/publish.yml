@@ -1,9 +1,10 @@
 name: Build & Publish n8n Node
 
 on:
+  workflow_dispatch:          # manuell im Actions-Tab startbar
   push:
     tags:
-      - "v*.*.*"
+      - "v*.*.*"              # läuft automatisch bei Tags wie v0.1.1
 
 jobs:
   build-publish:
@@ -14,17 +15,19 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install
+
+      - run: npm install       # kein package-lock? -> install statt ci
       - run: npm run build
       - run: npm pack
+
       - name: Publish to npm
         if: startsWith(github.ref, 'refs/tags/')
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Upload TGZ artifact
         uses: actions/upload-artifact@v4
         with:
           name: package-tgz
           path: "*.tgz"
-
