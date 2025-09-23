@@ -1,10 +1,10 @@
 name: Build & Publish n8n Node
 
 on:
-  workflow_dispatch:          # manuell im Actions-Tab startbar
+  workflow_dispatch:
   push:
     tags:
-      - "v*.*.*"              # läuft automatisch bei Tags wie v0.1.1
+      - "v*.*.*"
 
 jobs:
   build-publish:
@@ -16,7 +16,7 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      - run: npm install       # kein package-lock? -> install statt ci
+      - run: npm install
       - run: npm run build
       - run: npm pack
 
