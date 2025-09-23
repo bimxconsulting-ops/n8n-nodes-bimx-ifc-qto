@@ -40,8 +40,9 @@ export async function runQtoOnIFC(buffer: Buffer): Promise<Row[]> {
         const indsPtr  = geom.GetIndexData();
 
         // web-ifc liefert TypedArrays; zur Sicherheit in die gewünschten Typen casten
-        const verts = new Float32Array((api as any).GetVertexArray(vertsPtr));
-        const inds  = new Uint32Array((api as any).GetIndexArray(indsPtr));
+        const verts = new Float32Array((api as any).GetVertexArray(geom.GetVertexData()));
+        const inds  = new Uint32Array((api as any).GetIndexArray(geom.GetIndexData()));
+
 
         area   += footprintAreaXY(verts, inds);
         volume += meshVolume(verts, inds);
