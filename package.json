@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "BIM X – IFC Space QTO (Binary IFC in → XLSX/TSV out) powered by web-ifc",
   "license": "MIT",
   "author": "BIM X Consulting",
@@ -20,9 +20,12 @@
     "web-ifc": "^0.0.46",
     "xlsx": "^0.18.5"
   },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
   "devDependencies": {
     "@types/node": "^20.12.12",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "n8n-workflow": "*"
   }
 }
-
