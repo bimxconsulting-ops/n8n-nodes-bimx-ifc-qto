@@ -2,6 +2,9 @@
   "compilerOptions": {
     "target": "ES2019",
     "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["es2019"],
+    "types": ["node"],
     "declaration": true,
     "outDir": "./dist",
     "esModuleInterop": true,
@@ -11,4 +14,3 @@
   },
   "include": ["src/**/*"]
 }
-
