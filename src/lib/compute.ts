@@ -1,4 +1,4 @@
-import path from "path";
+// src/lib/compute.ts
 import { IfcAPI, IFCSPACE } from "web-ifc";
 import { footprintAreaXY, meshVolume } from "./mesh-math";
 
@@ -13,8 +13,8 @@ export type Row = {
 
 export async function runQtoOnIFC(buffer: Buffer): Promise<Row[]> {
   const api = new IfcAPI();
-  // lädt die in /dist/wasm kopierte wasm-Datei
-  // await api.SetWasmPath(path.join(__dirname, "..", "..", "wasm"));
+
+  // In Node.js lädt web-ifc seine WASM-Datei automatisch (kein SetWasmPath nötig)
   await api.Init();
 
   const modelID = api.OpenModel(new Uint8Array(buffer));
@@ -24,27 +24,30 @@ export async function runQtoOnIFC(buffer: Buffer): Promise<Row[]> {
 
   for (let i = 0; i < ids.size(); i++) {
     const id = ids.get(i);
+    // true -> tief aufgelöste Struktur (Representation etc.)
     const line: any = api.GetLine(modelID, id, true);
 
-    let area = 0, volume = 0;
-    const rep = line?.Representation?.Representations?.[0];
+    let area = 0;
+    let volume = 0;
 
-    if (rep?.Items) {
-      for (const item of rep.Items) {
-        if (!item.Geometry) continue;
+    // Es kann mehrere Repräsentationen geben – alle durchgehen
+    const reps = line?.Representation?.Representations ?? [];
+    for (const rep of reps) {
+      const items = rep?.Items ?? [];
+      for (const item of items) {
+        if (!item?.Geometry) continue;
+
         const geom = api.GetGeometry(modelID, item.Geometry);
 
-        // neu: mit der „ein Argument“-Signatur arbeiten
-        // (einige Type-Defs erlauben nur ptr statt (modelID, ptr, size))
+        // Node-API: nur je ein Pointer-Argument
         const vertsPtr = geom.GetVertexData();
-        const indsPtr  = geom.GetIndexData();
+        const indsPtr = geom.GetIndexData();
 
-        // web-ifc liefert TypedArrays; zur Sicherheit in die gewünschten Typen casten
-        const verts = new Float32Array((api as any).GetVertexArray(geom.GetVertexData()));
-        const inds  = new Uint32Array((api as any).GetIndexArray(geom.GetIndexData()));
+        // web-ifc liefert TypedArrays; für Sicherheit in gewünschte Typen casten
+        const verts = new Float32Array((api as any).GetVertexArray(vertsPtr));
+        const inds = new Uint32Array((api as any).GetIndexArray(indsPtr));
 
-
-        area   += footprintAreaXY(verts, inds);
+        area += footprintAreaXY(verts, inds);
         volume += meshVolume(verts, inds);
       }
     }
