@@ -69,6 +69,22 @@ export class BimxIfcSpaceQto implements INodeType {
               "Wenn aktiviert, werden alle Parameter/Quantities/Psets der IfcSpaces flach ausgegeben (z.B. PsetName.Property, QtoName.Quantity).",
           },
           {
+            displayName: "Use Geometry Fallback",
+            name: "geometryFallback",
+            type: "boolean",
+            default: true,
+            description:
+              "Falls Area/Volume in den Quantities fehlen, werden sie aus der IfcSpace-Mesh-Geometrie trianguliert berechnet.",
+          },
+          {
+            displayName: "Force Geometry",
+            name: "geometryForce",
+            type: "boolean",
+            default: false,
+            description:
+              "Area/Volume immer aus der Geometrie berechnen (überschreibt vorhandene Quantities).",
+          },
+          {
             displayName: "Rename",
             name: "rename",
             type: "fixedCollection",
@@ -109,131 +125,4 @@ export class BimxIfcSpaceQto implements INodeType {
     for (let i = 0; i < items.length; i++) {
       const binProp = this.getNodeParameter("binaryProperty", i) as string;
       const wantXlsx = this.getNodeParameter("xlsx", i) as boolean;
-      const wantTsv = this.getNodeParameter("tsv", i) as boolean;
-      const round = this.getNodeParameter("round", i) as number;
-
-      const optRaw = this.getNodeParameter("options", i, {}) as any;
-
-      // ExtraParameters parsen (comma-separated → string[])
-      const extraParameters: string[] = String(optRaw.extraParameters || "")
-        .split(",")
-        .map((s: string) => s.trim())
-        .filter(Boolean);
-
-      const allParameters = !!optRaw.allParameters;
-
-      const renameList: { from: string; to: string }[] =
-        Array.isArray(optRaw?.rename?.mapping) ? optRaw.rename.mapping : [];
-
-      const bin = items[i].binary?.[binProp];
-      if (!bin?.data) {
-        throw new NodeOperationError(
-          this.getNode(),
-          `Binary property "${binProp}" missing`,
-          { itemIndex: i }
-        );
-      }
-
-      const buffer = Buffer.from(bin.data, "base64");
-
-      // --- QTO & Parameter lesen ---
-      const rows = await runQtoOnIFC(buffer, {
-        extraParameters,
-        allParameters,
-      } as QtoOptions);
-
-      // Runden nur für Area / Volume (falls numeric)
-      const rNum = (v: any) =>
-        typeof v === "number" ? Number(v.toFixed(round)) : v;
-
-      const rowsRounded = rows.map((rw) => {
-        const copy: any = { ...rw };
-        if (copy.Area !== undefined) copy.Area = rNum(copy.Area);
-        if (copy.Volume !== undefined) copy.Volume = rNum(copy.Volume);
-        return copy;
-      });
-
-      // Rename anwenden
-      const rowsRenamed = rowsRounded.map((rw) => {
-        const obj: any = { ...rw };
-        for (const m of renameList) {
-          const from = String(m.from || "").trim();
-          const to = String(m.to || "").trim();
-          if (!from || !to) continue;
-          if (Object.prototype.hasOwnProperty.call(obj, from)) {
-            obj[to] = obj[from];
-            delete obj[from];
-          }
-        }
-        return obj;
-      });
-
-      // Ausgabe-Item
-      const newItem: any = {
-        json: { count: rowsRenamed.length },
-        binary: {},
-      };
-
-      // ---- XLSX ----
-      if (wantXlsx) {
-        const ws = XLSX.utils.json_to_sheet(rowsRenamed);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, "IfcSpaces");
-        const xbuf: Buffer = XLSX.write(wb, {
-          type: "buffer",
-          bookType: "xlsx",
-        }) as unknown as Buffer;
-
-        const xbin = await this.helpers.prepareBinaryData(Buffer.from(xbuf));
-        xbin.fileName = "spaces_qto.xlsx";
-        xbin.mimeType =
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-        newItem.binary["xlsx"] = xbin;
-      }
-
-      // ---- TSV (mit dynamischen Spalten, Dezimal-Komma) ----
-      if (wantTsv) {
-        // Spalten ermitteln (stabile Reihenfolge mit Kernfeldern zuerst)
-        const coreOrder = [
-          "ExpressID",
-          "GlobalId",
-          "Name",
-          "LongName",
-          "Area",
-          "Volume",
-        ];
-        const allKeys = new Set<string>();
-        for (const r of rowsRenamed) {
-          Object.keys(r).forEach((k) => allKeys.add(k));
-        }
-        // Restliche Felder alphabetisch, aber Kernfelder zuerst
-        const extraKeys = [...allKeys].filter((k) => !coreOrder.includes(k)).sort();
-        const headers = [...coreOrder.filter((k) => allKeys.has(k)), ...extraKeys];
-
-        const toCell = (v: any) => {
-          if (v === null || v === undefined) return "";
-          if (typeof v === "number") return String(v).replace(".", ",");
-          if (typeof v === "string") return v.replace(/\t/g, " ").replace(/\r?\n/g, " ");
-          return String(v);
-        };
-
-        const lines: string[] = [];
-        lines.push(headers.join("\t"));
-        for (const r of rowsRenamed) {
-          const row = headers.map((h) => toCell((r as any)[h]));
-          lines.push(row.join("\t"));
-        }
-
-        const tbuf = Buffer.from(lines.join("\n"), "utf8");
-        const tbin = await this.helpers.prepareBinaryData(tbuf);
-        tbin.fileName = "spaces_qto.tsv";
-        tbin.mimeType = "text/tab-separated-values";
-        newItem.binary["tsv"] = tbin;
-      }
-
-      out.push(newItem);
-    }
-
-    return this.prepareOutputData(out);
-  }
-}
+      const wantTsv = this.getNodePar
