@@ -8,7 +8,7 @@ export class BimxIfcSpaceQto implements INodeType {
   description: INodeTypeDescription = {
     displayName: "BIM X – IFC Space QTO",
     name: "bimxIfcSpaceQto",
-    icon: "file:ifc.svg",
+    icon: "file:BIMX.svg",
     group: ["transform"],
     version: 1,
     description: "Binary IFC in → XLSX/TSV out (Area/Volume of IfcSpaces via web-ifc)",
