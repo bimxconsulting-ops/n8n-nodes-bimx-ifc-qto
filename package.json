@@ -6,16 +6,25 @@
   "author": "BIM X Consulting",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "keywords": ["n8n-community-node-package","bim","ifc","web-ifc","qto"],
-  "n8n": { "nodes": ["dist/nodes/BimxIfcSpaceQto.node.js"], "credentials": [] },
+  "type": "commonjs",
+  "keywords": ["n8n-community-node-package", "bim", "ifc", "web-ifc", "qto"],
+  "n8n": {
+    "nodes": ["dist/nodes/BimxIfcSpaceQto.node.js"],
+    "credentials": []
+  },
   "scripts": {
     "build": "tsc && node ./scripts/copy-assets.cjs",
+    "prepack": "npm run build",
     "pack": "npm run build && npm pack",
     "publish:public": "npm run build && npm publish --access public"
   },
-  "files": ["dist", "LICENSE", "README.md"],
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "dependencies": {
-    "web-ifc": "^0.0.51",
+    "web-ifc": "0.0.51",
     "xlsx": "^0.18.5"
   },
   "peerDependencies": {
@@ -28,5 +37,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
