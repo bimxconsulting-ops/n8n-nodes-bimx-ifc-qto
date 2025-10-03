@@ -11,8 +11,10 @@ import {
 } from "web-ifc";
 
 export interface QtoOptions {
-  extraParameters?: string[];   // zusätzliche Parameter-Namen (case-insensitive)
-  allParameters?: boolean;      // alle Parameter flat sammeln (Psets + Qtos + Basis-Attribute)
+  extraParameters?: string[];    // zusätzliche Parameter (case-insensitive)
+  allParameters?: boolean;       // alle Parameter/Quantities flatten
+  geometryFallback?: boolean;    // falls QTO fehlt → Geometrie aus Mesh
+  geometryForce?: boolean;       // immer Geometrie verwenden (überschreibt QTO)
 }
 
 type Dict = Record<string, any>;
@@ -38,24 +40,23 @@ function asNum(v: any): number | undefined {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
-
 function getVecIds(vec: any): number[] {
-  // web-ifc Vector-like: size(), get(i)
   if (!vec || typeof vec.size !== "function" || typeof vec.get !== "function") return [];
   const out: number[] = [];
   const n = vec.size();
   for (let i = 0; i < n; i++) out.push(vec.get(i));
   return out;
 }
-
 function pickFirstDefined<T>(...candidates: (T | undefined)[]): T | undefined {
   for (const c of candidates) if (c !== undefined) return c;
   return undefined;
 }
-
 function pushKv(target: Dict, key: string, val: any) {
   if (val === undefined || val === null) return;
   target[key] = val;
+}
+function lowercaseSet(arr?: string[]) {
+  return new Set((arr || []).map((s) => s.toLowerCase().trim()).filter(Boolean));
 }
 
 async function collectRelsByProps(ifc: IfcAPI, modelID: number, elementId: number) {
@@ -75,169 +76,10 @@ function readPropSingleValue(ifc: IfcAPI, modelID: number, pid: number) {
   const p = ifc.GetLine(modelID, pid);
   if (!p) return undefined as unknown as { name?: string; value?: any };
   const name = asStr(p.Name);
-  // Many cases: NominalValue = { value: ... }
   const val = p.NominalValue && typeof p.NominalValue === "object" && "value" in p.NominalValue
     ? (p.NominalValue as any).value
     : p.NominalValue ?? p.Description ?? p.EnumerationValues ?? undefined;
   return { name, value: val };
 }
 
-function readElementQuantities(ifc: IfcAPI, modelID: number, qtoId: number) {
-  const qto = ifc.GetLine(modelID, qtoId);
-  if (!qto) return { name: undefined as string | undefined, pairs: {} as Dict };
-  const qtoName = asStr(qto.Name);
-  const result: Dict = {};
-  const qIds: number[] = Array.isArray(qto.Quantities) ? qto.Quantities.map(asId).filter(Boolean) as number[] : [];
-  for (const qid of qIds) {
-    const q = qid ? ifc.GetLine(modelID, qid) : undefined;
-    if (!q) continue;
-    const qName = asStr(q.Name) || String(qid);
-    if (q.expressID && q.type === IFCQUANTITYAREA) {
-      const v = pickFirstDefined(asNum(q.AreaValue), asNum(q.Value), asNum(q.LengthValue));
-      pushKv(result, qName, v);
-    } else if (q.expressID && q.type === IFCQUANTITYVOLUME) {
-      const v = pickFirstDefined(asNum(q.VolumeValue), asNum(q.Value));
-      pushKv(result, qName, v);
-    } else {
-      // other quantity types
-      const v = pickFirstDefined(asNum((q as any).Value), asNum((q as any).LengthValue), asNum((q as any).AreaValue), asNum((q as any).VolumeValue)) ??
-        asStr((q as any).Value);
-      pushKv(result, qName, v);
-    }
-  }
-  return { name: qtoName, pairs: result };
-}
-
-function readPropertySet(ifc: IfcAPI, modelID: number, psetId: number) {
-  const pset = ifc.GetLine(modelID, psetId);
-  if (!pset) return { name: undefined as string | undefined, pairs: {} as Dict };
-  const psetName = asStr(pset.Name);
-  const pairs: Dict = {};
-  const pIds: number[] = Array.isArray(pset.HasProperties) ? pset.HasProperties.map(asId).filter(Boolean) as number[] : [];
-  for (const pid of pIds) {
-    const prop = pid ? ifc.GetLine(modelID, pid) : undefined;
-    if (!prop) continue;
-    if (prop.type === IFCPROPERTYSINGLEVALUE) {
-      const r = readPropSingleValue(ifc, modelID, pid);
-      if (r?.name) pairs[r.name] = r.value;
-    } else {
-      // some other property type – try generic fields
-      const name = asStr((prop as any).Name) || String(pid);
-      const val =
-        pickFirstDefined(asStr((prop as any).NominalValue), asStr((prop as any).Description)) ??
-        (typeof (prop as any).NominalValue === "object" && (prop as any).NominalValue?.value);
-      if (name && val !== undefined) pairs[name] = val;
-    }
-  }
-  return { name: psetName, pairs };
-}
-
-function lowercaseSet(arr?: string[]) {
-  return new Set((arr || []).map((s) => s.toLowerCase().trim()).filter(Boolean));
-}
-
-export async function runQtoOnIFC(buffer: Buffer | Uint8Array, opts: QtoOptions = {}) {
-  const ifc = new IfcAPI();
-  await ifc.Init();
-
-  const modelID = ifc.OpenModel(buffer as any);
-  try {
-    const spaceIds = getVecIds(ifc.GetLineIDsWithType(modelID, IFCSPACE));
-
-    const allRows: Dict[] = [];
-
-    const wantAll = !!opts.allParameters;
-    const extraSet = lowercaseSet(opts.extraParameters);
-
-    for (const sid of spaceIds) {
-      const s = ifc.GetLine(modelID, sid);
-      if (!s) continue;
-
-      const base: Dict = {
-        ExpressID: sid,
-      };
-
-      // Basis-Attribute
-      pushKv(base, "GlobalId", asStr(s.GlobalId));
-      pushKv(base, "Name", asStr(s.Name));
-      pushKv(base, "LongName", asStr(s.LongName));
-      pushKv(base, "Description", asStr(s.Description));
-      pushKv(base, "ObjectType", asStr(s.ObjectType));
-      pushKv(base, "Tag", asStr(s.Tag));
-
-      // Psets & Qtos via IfcRelDefinesByProperties
-      const rels = await collectRelsByProps(ifc, modelID, sid);
-
-      // Sammelbehaelter
-      const flatAll: Dict = {};  // PsetName.PropName / QtoName.QuantityName
-      let area: number | undefined;
-      let volume: number | undefined;
-
-      for (const rel of rels) {
-        const propDefId = asId(rel.RelatingPropertyDefinition);
-        if (!propDefId) continue;
-        const pd = ifc.GetLine(modelID, propDefId);
-        if (!pd) continue;
-
-        if (pd.type === IFCELEMENTQUANTITY) {
-          const { name: qName, pairs } = readElementQuantities(ifc, modelID, propDefId);
-          // Typische Kandidaten
-          const candArea = pickFirstDefined(
-            asNum(pairs["NetFloorArea"]),
-            asNum(pairs["GrossFloorArea"]),
-            asNum(pairs["Area"]),
-          );
-          const candVol = pickFirstDefined(
-            asNum(pairs["NetVolume"]),
-            asNum(pairs["GrossVolume"]),
-            asNum(pairs["Volume"]),
-          );
-          area = area ?? candArea;
-          volume = volume ?? candVol;
-
-          // flatten für AllParameters / ExtraParameters
-          if (qName) {
-            for (const [k, v] of Object.entries(pairs)) {
-              flatAll[`${qName}.${k}`] = v;
-            }
-          } else {
-            for (const [k, v] of Object.entries(pairs)) {
-              flatAll[k] = v;
-            }
-          }
-        } else if (pd.type === IFCPROPERTYSET) {
-          const { name: pName, pairs } = readPropertySet(ifc, modelID, propDefId);
-
-          // ExtraParameters und AllParameters ablegen
-          for (const [k, v] of Object.entries(pairs)) {
-            const keyFlat = pName ? `${pName}.${k}` : k;
-            flatAll[keyFlat] = v;
-
-            // Falls der Nutzer genau diesen Key extra verlangt (case-insensitive, ohne Pset-Präfix)
-            if (extraSet.has(k.toLowerCase())) {
-              // Im Output ohne Präfix ausgeben
-              base[k] = v;
-            }
-          }
-        }
-      }
-
-      // Area/Volume in Basis-Keys schreiben (falls gefunden)
-      if (area !== undefined) base["Area"] = area;
-      if (volume !== undefined) base["Volume"] = volume;
-
-      // Wenn AllParameters: alles aus flatAll zusätzlich reinkippen
-      if (wantAll) {
-        for (const [k, v] of Object.entries(flatAll)) {
-          if (base[k] === undefined) base[k] = v;
-        }
-      }
-
-      allRows.push(base);
-    }
-
-    return allRows;
-  } finally {
-    try { ifc.CloseModel(modelID); } catch {}
-  }
-}
+function readElementQuantities(ifc:
