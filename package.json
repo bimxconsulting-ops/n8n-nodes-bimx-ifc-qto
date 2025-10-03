@@ -9,11 +9,11 @@
   "keywords": ["n8n-community-node-package","bim","ifc","web-ifc","qto"],
   "n8n": { "nodes": ["dist/nodes/BimxIfcSpaceQto.node.js"], "credentials": [] },
 "scripts": {
-  "build": "tsc",
+  "build": "tsc && node ./scripts/copy-assets.cjs",
   "pack": "npm run build && npm pack",
   "publish:public": "npm run build && npm publish --access public"
 },
-  "files": ["dist", "LICENSE", "README.md"],
+"files": ["dist", "LICENSE", "README.md"],
   "dependencies": {
     "web-ifc": "^0.0.46",
     "xlsx": "^0.18.5"
