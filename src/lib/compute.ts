@@ -1,187 +1,177 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { IfcAPI } from "web-ifc";
-
-// IFC type ids (stabil in web-ifc)
-const IFCSPACE = 27; // WebIFC.IFCSpace
-const IFCRELDEFINESBYPROPERTIES = 358;
-const IFCPROPERTYSINGLEVALUE = 1458870069;
-const IFCELEMENTQUANTITY = 3252022860;
-const IFCQUANTITYAREA = 2389731845;
-const IFCQUANTITYVOLUME = 1697651030;
-
-type Row = {
-  GlobalId: string;
-  Name?: string | null;
-  Area: number | null;
-  Volume: number | null;
-};
-
-function toNumber(v: any): number | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
-    const withDot = v.replace(",", ".").trim();
-    const n = Number(withDot);
-    return Number.isFinite(n) ? n : null;
-  }
-  if (typeof v === "object" && "value" in v) {
-    // web-ifc nominal values are often { value: number|string }
-    return toNumber((v as any).value);
-  }
-  return null;
-}
-
-function pickFirst(...vals: Array<number | null | undefined>): number | null {
-  for (const v of vals) {
-    const n = v ?? null;
-    if (n !== null) return n;
-  }
-  return null;
-}
-
-async function getAllLines(api: IfcAPI, modelID: number, type: number): Promise<any[]> {
-  const ids = await api.GetLineIDsWithType(modelID, type);
-  const result: any[] = [];
-  for (let i = 0; i < ids.size(); i++) {
-    const id = ids.get(i);
-    const line = await api.GetLine(modelID, id, true);
-    result.push(line);
-  }
-  return result;
-}
-
-function arrayify<T>(v: T | T[] | undefined | null): T[] {
-  if (!v) return [];
-  return Array.isArray(v) ? v : [v];
-}
+// src/lib/compute.ts
+import * as path from "path";
+import * as WEBIFC from "web-ifc";
 
 /**
- * Holt für einen Space die zugewiesenen PropertySets & Quantities
+ * Liest für alle IfcSpaces die Area/Volume.
+ * 1) Psets: Pset_Revit_Dimensions, Qto_SpaceBaseQuantities, IfcElementQuantity (IfcQuantityArea/Volume)
+ * 2) Fallback Geometrie: Volumen aus Dreiecksmesh (exakt, falls geschlossen),
+ *    "Fläche" näherungsweise als Summe horizontaler Dreiecke (Boden/Decke).
  */
-async function collectRelProps(api: IfcAPI, modelID: number, spaceExpressId: number) {
-  // Alle IfcRelDefinesByProperties einmal holen und lokal filtern (performant genug für QTO)
-  const rels = await getAllLines(api, modelID, IFCRELDEFINESBYPROPERTIES);
-  return rels.filter((r) => arrayify(r.RelatedObjects).some((o: any) => o?.value === spaceExpressId));
-}
+export async function runQtoOnIFC(buffer: Buffer): Promise<Array<{ GlobalId: string; Name: string; Area: number | null; Volume: number | null }>> {
+  const api = new WEBIFC.IfcAPI();
 
-function getPsetValueFromSingleValue(pset: any, wantedName: string): number | null {
-  const hasProps = arrayify<any>(pset?.HasProperties);
-  for (const p of hasProps) {
-    if (p?.type === IFCPROPERTYSINGLEVALUE) {
-      const name = p?.Name?.value ?? p?.Name;
-      if (typeof name === "string" && name.toLowerCase() === wantedName.toLowerCase()) {
-        return toNumber(p?.NominalValue);
-      }
-    }
-  }
-  return null;
-}
-
-function getQuantityFromElementQuantity(q: any, wantedName: string, wantedType: number): number | null {
-  const qs = arrayify<any>(q?.Quantities);
-  for (const x of qs) {
-    if (x?.type !== wantedType) continue;
-    const name = x?.Name?.value ?? x?.Name;
-    if (typeof name === "string" && name.toLowerCase() === wantedName.toLowerCase()) {
-      return toNumber(x?.AreaValue ?? x?.VolumeValue ?? x?.value);
-    }
-  }
-  return null;
-}
-
-/**
- * Liest Area/Volume aus typischen Quellen – ohne Geometrie:
- *  - Qto_SpaceBaseQuantities (IfcElementQuantity -> IfcQuantityArea/Volume)
- *  - PSet_Revit_Dimensions (IfcPropertySingleValue "Area"/"Volume")
- *  - beliebige Psets mit "Area"/"Volume" als SingleValue
- */
-async function extractAreaVolume(api: IfcAPI, modelID: number, space: any): Promise<{ area: number | null; volume: number | null; }> {
-  const rels = await collectRelProps(api, modelID, space.expressID);
-
-  let areaQto: number | null = null;
-  let volumeQto: number | null = null;
-  let areaPset: number | null = null;
-  let volumePset: number | null = null;
-
-  for (const rel of rels) {
-    const prop = rel?.RelatingPropertyDefinition;
-    if (!prop) continue;
-
-    // IfcElementQuantity (Qto)
-    if (prop.type === IFCELEMENTQUANTITY) {
-      const qName = (prop?.Name?.value ?? prop?.Name ?? "").toString().toLowerCase();
-
-      // Standardnamen häufigster Space-QTOs
-      if (qName.includes("qto_spacebasequantities") || qName.includes("basequantities") || qName.includes("spacequantities")) {
-        areaQto = pickFirst(areaQto, getQuantityFromElementQuantity(prop, "GrossFloorArea", IFCQUANTITYAREA));
-        areaQto = pickFirst(areaQto, getQuantityFromElementQuantity(prop, "NetFloorArea", IFCQUANTITYAREA));
-        volumeQto = pickFirst(volumeQto, getQuantityFromElementQuantity(prop, "GrossVolume", IFCQUANTITYVOLUME));
-        volumeQto = pickFirst(volumeQto, getQuantityFromElementQuantity(prop, "NetVolume", IFCQUANTITYVOLUME));
-      } else {
-        // generischer Versuch
-        areaQto = pickFirst(
-          areaQto,
-          getQuantityFromElementQuantity(prop, "Area", IFCQUANTITYAREA),
-          getQuantityFromElementQuantity(prop, "FloorArea", IFCQUANTITYAREA)
-        );
-        volumeQto = pickFirst(
-          volumeQto,
-          getQuantityFromElementQuantity(prop, "Volume", IFCQUANTITYVOLUME)
-        );
-      }
-    }
-
-    // IfcPropertySet mit SingleValues
-    const psetName = (prop?.Name?.value ?? prop?.Name ?? "").toString().toLowerCase();
-    if (prop?.HasProperties) {
-      // Revit-Set
-      if (psetName.includes("revit") && psetName.includes("dimensions")) {
-        areaPset = pickFirst(areaPset, getPsetValueFromSingleValue(prop, "Area"));
-        volumePset = pickFirst(volumePset, getPsetValueFromSingleValue(prop, "Volume"));
-      } else {
-        // generisch
-        areaPset = pickFirst(areaPset, getPsetValueFromSingleValue(prop, "Area"));
-        volumePset = pickFirst(volumePset, getPsetValueFromSingleValue(prop, "Volume"));
-      }
-    }
-  }
-
-  return {
-    area: pickFirst(areaQto, areaPset),
-    volume: pickFirst(volumeQto, volumePset),
-  };
-}
-
-/**
- * Lädt ein IFC aus einem Buffer, iteriert IfcSpace und liefert (GlobalId, Name, Area, Volume).
- * Es werden ausschließlich Psets/Quantities ausgewertet – keine Geometrie-Berechnung.
- */
-export async function runQtoOnIFC(buffer: Buffer): Promise<Row[]> {
-  const api = new IfcAPI();
-  await api.Init();
-
-  // model öffnen
-  const modelID = api.OpenModel(buffer);
-
+  // WASM initialisieren (Node: Pfad dynamisch auflösen)
   try {
-    const spaces = await getAllLines(api, modelID, IFCSPACE);
-
-    const rows: Row[] = [];
-    for (const s of spaces) {
-      const gid = (s?.GlobalId?.value ?? s?.GlobalId ?? "").toString();
-      const name = (s?.Name?.value ?? s?.Name ?? null) as string | null;
-
-      const { area, volume } = await extractAreaVolume(api, modelID, s);
-
-      rows.push({
-        GlobalId: gid,
-        Name: name,
-        Area: area,
-        Volume: volume,
-      });
+    await api.Init();
+  } catch {
+    try {
+      const wasmDir = path.dirname(require.resolve("web-ifc/web-ifc.wasm"));
+      (api as any).SetWasmPath?.(wasmDir + "/");
+      await api.Init();
+    } catch (err) {
+      throw new Error("web-ifc WASM konnte nicht initialisiert werden: " + (err as Error).message);
     }
+  }
+
+  const modelID = api.OpenModel(new Uint8Array(buffer));
+  try {
+    const rows: Array<{ GlobalId: string; Name: string; Area: number | null; Volume: number | null }> = [];
+
+    // --- Hilfsfunktionen -----------------------------------------------------
+    const asStr = (v: any): string | null => {
+      if (v == null) return null;
+      if (typeof v === "string") return v;
+      if (typeof v === "object" && "value" in v) return String((v as any).value);
+      return String(v);
+    };
+
+    const asNum = (v: any): number | null => {
+      if (v == null) return null;
+      if (typeof v === "number") return v;
+      if (typeof v === "object" && "value" in v) {
+        const n = Number((v as any).value);
+        return Number.isFinite(n) ? n : null;
+      }
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    // Mappe: SpaceID -> Array<PropertyDefinitionID>
+    const relIDs = api.GetLineIDsWithType(modelID, WEBIFC.IFCRELDEFINESBYPROPERTIES);
+    const defsByObj = new Map<number, number[]>();
+    for (let i = 0; i < relIDs.size(); i++) {
+      const rid = relIDs.get(i);
+      const rel: any = api.GetLine(modelID, rid);
+      const related: number[] = rel?.RelatedObjects || [];
+      const defId: number | undefined = rel?.RelatingPropertyDefinition;
+      if (!defId) continue;
+      for (const objId of related) {
+        const arr = defsByObj.get(objId) || [];
+        arr.push(defId);
+        defsByObj.set(objId, arr);
+      }
+    }
+
+    // Alle IfcSpaces
+    const spaceIDs = api.GetLineIDsWithType(modelID, WEBIFC.IFCSPACE);
+    for (let i = 0; i < spaceIDs.size(); i++) {
+      const id = spaceIDs.get(i);
+      const sp: any = api.GetLine(modelID, id);
+
+      const name = asStr(sp?.Name) ?? "";
+      const gid = asStr(sp?.GlobalId) ?? String(sp?.GlobalId ?? id);
+
+      let area: number | null = null;
+      let volume: number | null = null;
+
+      // ---- 1) Psets & Quantities -------------------------------------------
+      const defs = defsByObj.get(id) || [];
+      for (const defId of defs) {
+        const def: any = api.GetLine(modelID, defId);
+        if (!def) continue;
+
+        // IfcPropertySet (z.B. Pset_Revit_Dimensions)
+        if (def.type === WEBIFC.IFCPROPERTYSET) {
+          const hasProps: number[] = def.HasProperties || [];
+          for (const pid of hasProps) {
+            const prop: any = api.GetLine(modelID, pid);
+            if (prop?.type === WEBIFC.IFCPROPERTYSINGLEVALUE) {
+              const pname = (asStr(prop?.Name) || "").toLowerCase();
+
+              // typische Namen aus Revit & generischen Psets
+              if (area == null && /^(area|grossfloorarea|netfloorarea|netarea|grossarea|basearea)$/i.test(pname)) {
+                area = asNum(prop?.NominalValue);
+              }
+              if (volume == null && /^(volume|grossvolume|netvolume)$/i.test(pname)) {
+                volume = asNum(prop?.NominalValue);
+              }
+            }
+          }
+        }
+
+        // IfcElementQuantity (z.B. Qto_SpaceBaseQuantities in IFC2x3/IFC4)
+        if (def.type === WEBIFC.IFCELEMENTQUANTITY) {
+          const qs: number[] = def.Quantities || [];
+          for (const qid of qs) {
+            const q: any = api.GetLine(modelID, qid);
+            if (!q) continue;
+
+            if (area == null) {
+              if (q.type === WEBIFC.IFCQUANTITYAREA) area = asNum(q.AreaValue);
+              else if ("AreaValue" in q) area = asNum(q.AreaValue);
+            }
+            if (volume == null) {
+              if (q.type === WEBIFC.IFCQUANTITYVOLUME) volume = asNum(q.VolumeValue);
+              else if ("VolumeValue" in q) volume = asNum(q.VolumeValue);
+            }
+          }
+        }
+      }
+
+      // ---- 2) Geometrie-Fallback -------------------------------------------
+      if (area == null || volume == null) {
+        try {
+          // Manche web-ifc-Versionen liefern {vb, ib}, andere {vertices, indices}
+          const flat: any = (api as any).GetFlatMesh?.(modelID, id);
+          const V: Float32Array | undefined = flat?.vb || flat?.vertices;
+          const I: Uint32Array | Uint16Array | undefined = flat?.ib || flat?.indices;
+
+          if (V && I && I.length >= 3) {
+            // Volumen via signiertes Tetraeder-Volumen
+            let vol = 0;
+            for (let f = 0; f < I.length; f += 3) {
+              const i1 = I[f] * 3, i2 = I[f + 1] * 3, i3 = I[f + 2] * 3;
+              const x1 = V[i1],     y1 = V[i1 + 1],     z1 = V[i1 + 2];
+              const x2 = V[i2],     y2 = V[i2 + 1],     z2 = V[i2 + 2];
+              const x3 = V[i3],     y3 = V[i3 + 1],     z3 = V[i3 + 2];
+
+              vol += (x1 * (y2 * z3 - z2 * y3)
+                    - y1 * (x2 * z3 - z2 * x3)
+                    + z1 * (x2 * y3 - y2 * x3)) / 6;
+            }
+            if (volume == null) volume = Math.abs(vol);
+
+            // Bodenfläche näherungsweise: Summe der Flächen von (nahezu) horizontalen Dreiecken
+            if (area == null) {
+              let floorArea = 0;
+              for (let f = 0; f < I.length; f += 3) {
+                const i1 = I[f] * 3, i2 = I[f + 1] * 3, i3 = I[f + 2] * 3;
+                const ax = V[i2] - V[i1],     ay = V[i2 + 1] - V[i1 + 1], az = V[i2 + 2] - V[i1 + 2];
+                const bx = V[i3] - V[i1],     by = V[i3 + 1] - V[i1 + 1], bz = V[i3 + 2] - V[i1 + 2];
+
+                const nx = ay * bz - az * by;
+                const ny = az * bx - ax * bz;
+                const nz = ax * by - ay * bx;
+
+                const areaTri = 0.5 * Math.sqrt(nx * nx + ny * ny + nz * nz);
+                // Normale ~ vertikal -> Fläche ~ horizontal -> trägt zur Boden-/Deckenfläche bei
+                const verticality = Math.abs(nz) / (Math.sqrt(nx * nx + ny * ny + nz * nz) + 1e-12);
+                if (verticality > 0.95) floorArea += areaTri;
+              }
+              area = floorArea;
+            }
+          }
+        } catch {
+          // Wenn Geometrie nicht verfügbar ist, lassen wir area/volume ggf. null
+        }
+      }
+
+      rows.push({ GlobalId: gid, Name: name, Area: area ?? null, Volume: volume ?? null });
+    }
+
     return rows;
   } finally {
-    api.CloseModel(modelID);
+    try { api.CloseModel(modelID); } catch {}
   }
 }
