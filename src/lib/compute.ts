@@ -14,7 +14,7 @@ export type Row = {
 export async function runQtoOnIFC(buffer: Buffer): Promise<Row[]> {
   const api = new IfcAPI();
   // lädt die in /dist/wasm kopierte wasm-Datei
-  await api.SetWasmPath(path.join(__dirname, "..", "..", "wasm"));
+  // await api.SetWasmPath(path.join(__dirname, "..", "..", "wasm"));
   await api.Init();
 
   const modelID = api.OpenModel(new Uint8Array(buffer));
