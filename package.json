@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "BIM X – IFC Space QTO (Binary IFC in → XLSX/TSV out) powered by web-ifc",
   "license": "MIT",
   "author": "BIM X Consulting",
@@ -8,11 +8,11 @@
   "types": "dist/index.d.ts",
   "keywords": ["n8n-community-node-package","bim","ifc","web-ifc","qto"],
   "n8n": { "nodes": ["dist/nodes/BimxIfcSpaceQto.node.js"], "credentials": [] },
-  "scripts": {
-    "build": "tsc && node ./scripts/copy-wasm.cjs",
-    "pack": "npm run build && npm pack",
-    "publish:public": "npm run build && npm publish --access public"
-  },
+"scripts": {
+  "build": "tsc",
+  "pack": "npm run build && npm pack",
+  "publish:public": "npm run build && npm publish --access public"
+},
   "files": ["dist", "LICENSE", "README.md"],
   "dependencies": {
     "web-ifc": "^0.0.46",
