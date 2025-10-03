@@ -1,146 +1,187 @@
-// src/lib/compute.ts
-// Orchestriert Space-Auslese + Area/Volume-Ermittlung inkl. 2D-Fallback.
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { IfcAPI } from "web-ifc";
 
-import type { IfcAPI } from 'web-ifc';
-import {
-  computeAreaVolumeFrom2D,
-} from './spaceMetrics';
+// IFC type ids (stabil in web-ifc)
+const IFCSPACE = 27; // WebIFC.IFCSpace
+const IFCRELDEFINESBYPROPERTIES = 358;
+const IFCPROPERTYSINGLEVALUE = 1458870069;
+const IFCELEMENTQUANTITY = 3252022860;
+const IFCQUANTITYAREA = 2389731845;
+const IFCQUANTITYVOLUME = 1697651030;
 
-export interface ComputeOptions {
-  /** Standardhöhe in m, falls keine Storey-Höhe ermittelbar */
-  defaultHeight?: number;
-  /** optional: XY-Skalierung, falls Einheitenfehler */
-  scaleXY?: number;
-}
+type Row = {
+  GlobalId: string;
+  Name?: string | null;
+  Area: number | null;
+  Volume: number | null;
+};
 
-export interface SpaceRow {
-  GlobalId?: string;
-  Name?: string;
-  LongName?: string;
-  Number?: string;
-  Storey?: string;
-  Area?: number;
-  Volume?: number;
-  [k: string]: any;
-}
-
-export async function computeSpaces(
-  ifc: IfcAPI,
-  modelID: number,
-  opts?: ComputeOptions,
-): Promise<SpaceRow[]> {
-  const rows: SpaceRow[] = [];
-  const it = ifc.GetLineIDsWithType(modelID, 'IFCSPACE');
-
-  for (let i = 0; i < it.size(); i++) {
-    const id = it.get(i);
-    const space = ifc.GetLine(modelID, id);
-    const row: SpaceRow = {
-      GlobalId: space?.GlobalId || space?.GlobalID || undefined,
-      Name: space?.LongName || space?.Name || undefined,
-      LongName: space?.LongName || undefined,
-      Number: await tryResolveRoomNumber(ifc, modelID, id, space),
-      Storey: await tryResolveStoreyName(ifc, modelID, id),
-      Area: 0,
-      Volume: 0,
-    };
-
-    // 1) Falls du bereits eine Mesh-basierte Ermittlung hast, hier aufrufen:
-    try {
-      const meshResult = await tryYourMeshAreaVolume(ifc, modelID, id);
-      if (meshResult) {
-        row.Area = meshResult.area ?? 0;
-        row.Volume = meshResult.volume ?? 0;
-      }
-    } catch {
-      // Mesh-Berechnung fehlgeschlagen -> egal, Fallback kommt.
-    }
-
-    // 2) Falls Area/Volume weiterhin 0 sind → 2D-Fallback
-    if (!row.Area || row.Area <= 0 || !row.Volume || row.Volume <= 0) {
-      try {
-        const { area, volume } = await computeAreaVolumeFrom2D(ifc, modelID, id, {
-          defaultHeight: opts?.defaultHeight ?? 2.8,
-          scaleXY: opts?.scaleXY ?? 1,
-        });
-        if (area > 0) row.Area = area;
-        if (volume > 0) row.Volume = volume;
-      } catch {
-        // bleibt 0 – dann ist der Space wirklich nicht auswertbar
-      }
-    }
-
-    rows.push(row);
+function toNumber(v: any): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const withDot = v.replace(",", ".").trim();
+    const n = Number(withDot);
+    return Number.isFinite(n) ? n : null;
   }
-
-  return rows;
-}
-
-/* ----------------------------- Helper/Resolver ---------------------------- */
-
-async function tryResolveRoomNumber(ifc: IfcAPI, modelID: number, spaceID: number, spaceObj: any): Promise<string | undefined> {
-  // 1) Standardfelder
-  if (spaceObj?.Number) return String(spaceObj.Number);
-
-  // 2) Psets (Revit/ArchiCAD)
-  const num = await findInPsets(ifc, modelID, spaceID, [
-    'Room Number',
-    'Number',
-    'Mark',
-    'Reference',
-  ]);
-  return num || undefined;
-}
-
-async function tryResolveStoreyName(ifc: IfcAPI, modelID: number, spaceID: number): Promise<string | undefined> {
-  // über RelContainedInSpatialStructure
-  const it = ifc.GetLineIDsWithType(modelID, 'IFCRELCONTAINEDINSPATIALSTRUCTURE');
-  for (let i = 0; i < it.size(); i++) {
-    const id = it.get(i);
-    const rel = ifc.GetLine(modelID, id);
-    if (!rel?.RelatingStructure) continue;
-    if (!Array.isArray(rel.RelatedElements)) continue;
-    if (rel.RelatedElements.includes(spaceID)) {
-      const storey = ifc.GetLine(modelID, rel.RelatingStructure);
-      return storey?.Name || storey?.LongName || undefined;
-    }
+  if (typeof v === "object" && "value" in v) {
+    // web-ifc nominal values are often { value: number|string }
+    return toNumber((v as any).value);
   }
-  return undefined;
+  return null;
 }
 
-async function findInPsets(ifc: IfcAPI, modelID: number, elemID: number, keys: string[]): Promise<string | null> {
-  // einfache Suche über IfcRelDefinesByProperties → PropertySets
-  const it = ifc.GetLineIDsWithType(modelID, 'IFCRELDEFINESBYPROPERTIES');
-  for (let i = 0; i < it.size(); i++) {
-    const id = it.get(i);
-    const rel = ifc.GetLine(modelID, id);
-    if (!Array.isArray(rel?.RelatedObjects) || !rel.RelatingPropertyDefinition) continue;
-    if (!rel.RelatedObjects.includes(elemID)) continue;
-    const pset = ifc.GetLine(modelID, rel.RelatingPropertyDefinition);
-    if (!pset) continue;
+function pickFirst(...vals: Array<number | null | undefined>): number | null {
+  for (const v of vals) {
+    const n = v ?? null;
+    if (n !== null) return n;
+  }
+  return null;
+}
 
-    // IfcPropertySet
-    if (pset?.HasProperties && Array.isArray(pset.HasProperties)) {
-      for (const pID of pset.HasProperties) {
-        const p = ifc.GetLine(modelID, pID);
-        const name = (p?.Name || '').toString().toLowerCase();
-        const wanted = keys.find(k => name === k.toLowerCase());
-        if (wanted) {
-          const val = p?.NominalValue?.value ?? p?.NominalValue ?? p?.NominalValue?.StringValue ?? p?.NominalValue?.IfcValue;
-          if (val != null) return String(val);
-        }
+async function getAllLines(api: IfcAPI, modelID: number, type: number): Promise<any[]> {
+  const ids = await api.GetLineIDsWithType(modelID, type);
+  const result: any[] = [];
+  for (let i = 0; i < ids.size(); i++) {
+    const id = ids.get(i);
+    const line = await api.GetLine(modelID, id, true);
+    result.push(line);
+  }
+  return result;
+}
+
+function arrayify<T>(v: T | T[] | undefined | null): T[] {
+  if (!v) return [];
+  return Array.isArray(v) ? v : [v];
+}
+
+/**
+ * Holt für einen Space die zugewiesenen PropertySets & Quantities
+ */
+async function collectRelProps(api: IfcAPI, modelID: number, spaceExpressId: number) {
+  // Alle IfcRelDefinesByProperties einmal holen und lokal filtern (performant genug für QTO)
+  const rels = await getAllLines(api, modelID, IFCRELDEFINESBYPROPERTIES);
+  return rels.filter((r) => arrayify(r.RelatedObjects).some((o: any) => o?.value === spaceExpressId));
+}
+
+function getPsetValueFromSingleValue(pset: any, wantedName: string): number | null {
+  const hasProps = arrayify<any>(pset?.HasProperties);
+  for (const p of hasProps) {
+    if (p?.type === IFCPROPERTYSINGLEVALUE) {
+      const name = p?.Name?.value ?? p?.Name;
+      if (typeof name === "string" && name.toLowerCase() === wantedName.toLowerCase()) {
+        return toNumber(p?.NominalValue);
       }
     }
   }
   return null;
 }
 
-/** Platzhalter – falls du bereits Mesh-Logik hattest, binde sie hier ein. */
-async function tryYourMeshAreaVolume(
-  _ifc: IfcAPI,
-  _modelID: number,
-  _spaceID: number,
-): Promise<{ area: number; volume: number } | null> {
-  // Wenn du nichts Mesh-basiertes nutzt, gib einfach null zurück
+function getQuantityFromElementQuantity(q: any, wantedName: string, wantedType: number): number | null {
+  const qs = arrayify<any>(q?.Quantities);
+  for (const x of qs) {
+    if (x?.type !== wantedType) continue;
+    const name = x?.Name?.value ?? x?.Name;
+    if (typeof name === "string" && name.toLowerCase() === wantedName.toLowerCase()) {
+      return toNumber(x?.AreaValue ?? x?.VolumeValue ?? x?.value);
+    }
+  }
   return null;
+}
+
+/**
+ * Liest Area/Volume aus typischen Quellen – ohne Geometrie:
+ *  - Qto_SpaceBaseQuantities (IfcElementQuantity -> IfcQuantityArea/Volume)
+ *  - PSet_Revit_Dimensions (IfcPropertySingleValue "Area"/"Volume")
+ *  - beliebige Psets mit "Area"/"Volume" als SingleValue
+ */
+async function extractAreaVolume(api: IfcAPI, modelID: number, space: any): Promise<{ area: number | null; volume: number | null; }> {
+  const rels = await collectRelProps(api, modelID, space.expressID);
+
+  let areaQto: number | null = null;
+  let volumeQto: number | null = null;
+  let areaPset: number | null = null;
+  let volumePset: number | null = null;
+
+  for (const rel of rels) {
+    const prop = rel?.RelatingPropertyDefinition;
+    if (!prop) continue;
+
+    // IfcElementQuantity (Qto)
+    if (prop.type === IFCELEMENTQUANTITY) {
+      const qName = (prop?.Name?.value ?? prop?.Name ?? "").toString().toLowerCase();
+
+      // Standardnamen häufigster Space-QTOs
+      if (qName.includes("qto_spacebasequantities") || qName.includes("basequantities") || qName.includes("spacequantities")) {
+        areaQto = pickFirst(areaQto, getQuantityFromElementQuantity(prop, "GrossFloorArea", IFCQUANTITYAREA));
+        areaQto = pickFirst(areaQto, getQuantityFromElementQuantity(prop, "NetFloorArea", IFCQUANTITYAREA));
+        volumeQto = pickFirst(volumeQto, getQuantityFromElementQuantity(prop, "GrossVolume", IFCQUANTITYVOLUME));
+        volumeQto = pickFirst(volumeQto, getQuantityFromElementQuantity(prop, "NetVolume", IFCQUANTITYVOLUME));
+      } else {
+        // generischer Versuch
+        areaQto = pickFirst(
+          areaQto,
+          getQuantityFromElementQuantity(prop, "Area", IFCQUANTITYAREA),
+          getQuantityFromElementQuantity(prop, "FloorArea", IFCQUANTITYAREA)
+        );
+        volumeQto = pickFirst(
+          volumeQto,
+          getQuantityFromElementQuantity(prop, "Volume", IFCQUANTITYVOLUME)
+        );
+      }
+    }
+
+    // IfcPropertySet mit SingleValues
+    const psetName = (prop?.Name?.value ?? prop?.Name ?? "").toString().toLowerCase();
+    if (prop?.HasProperties) {
+      // Revit-Set
+      if (psetName.includes("revit") && psetName.includes("dimensions")) {
+        areaPset = pickFirst(areaPset, getPsetValueFromSingleValue(prop, "Area"));
+        volumePset = pickFirst(volumePset, getPsetValueFromSingleValue(prop, "Volume"));
+      } else {
+        // generisch
+        areaPset = pickFirst(areaPset, getPsetValueFromSingleValue(prop, "Area"));
+        volumePset = pickFirst(volumePset, getPsetValueFromSingleValue(prop, "Volume"));
+      }
+    }
+  }
+
+  return {
+    area: pickFirst(areaQto, areaPset),
+    volume: pickFirst(volumeQto, volumePset),
+  };
+}
+
+/**
+ * Lädt ein IFC aus einem Buffer, iteriert IfcSpace und liefert (GlobalId, Name, Area, Volume).
+ * Es werden ausschließlich Psets/Quantities ausgewertet – keine Geometrie-Berechnung.
+ */
+export async function runQtoOnIFC(buffer: Buffer): Promise<Row[]> {
+  const api = new IfcAPI();
+  await api.Init();
+
+  // model öffnen
+  const modelID = api.OpenModel(buffer);
+
+  try {
+    const spaces = await getAllLines(api, modelID, IFCSPACE);
+
+    const rows: Row[] = [];
+    for (const s of spaces) {
+      const gid = (s?.GlobalId?.value ?? s?.GlobalId ?? "").toString();
+      const name = (s?.Name?.value ?? s?.Name ?? null) as string | null;
+
+      const { area, volume } = await extractAreaVolume(api, modelID, s);
+
+      rows.push({
+        GlobalId: gid,
+        Name: name,
+        Area: area,
+        Volume: volume,
+      });
+    }
+    return rows;
+  } finally {
+    api.CloseModel(modelID);
+  }
 }
