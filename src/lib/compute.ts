@@ -1,144 +1,44 @@
 // src/lib/compute.ts
-import {
-  IfcAPI,
-  IFCSPACE,
-  IFCRELDEFINESBYPROPERTIES,
-  IFCELEMENTQUANTITY,
-  IFCPROPERTYSET,
-  IFCPROPERTYSINGLEVALUE,
-  IFCQUANTITYAREA,
-  IFCQUANTITYVOLUME,
-} from "web-ifc";
+import path from "path";
+import { IfcAPI } from "web-ifc";
+
+// Web-IFC numeric constants are not exported as enums in typings, so use hard values:
+const IFCSPACE = 27; // IFC2x3 & IFC4: IfcSpace type id (stable in web-ifc)
+const IFCRELDEFINESBYPROPERTIES = 418;
+const IFCPROPERTYSET = 157;
+const IFCRELDEFINESBYTYPE = 419;
+const IFCELEMENTQUANTITY = 144;
+const IFCPROPERTYSINGLEVALUE = 147;
+const IFCQUANTITYAREA = 103;
+const IFCQUANTITYVOLUME = 109;
+
+type Dict<T = any> = Record<string, T>;
 
 export interface QtoOptions {
-  extraParameters?: string[];    // zusätzliche Parameter (case-insensitive)
-  allParameters?: boolean;       // alle Parameter/Quantities flatten
-  geometryFallback?: boolean;    // falls QTO fehlt → Geometrie aus Mesh
-  geometryForce?: boolean;       // immer Geometrie verwenden (überschreibt QTO)
+  allParameters?: boolean;
+  select?: string[];             // extra property names to pull if present
+  rename?: Dict<string>;         // output key renames {old: new}
+  useGeometryFallback?: boolean; // if no QTO/PSets area/volume -> try geometry
+  forceGeometry?: boolean;       // always compute geometry (even if QTO exists)
+  wasmPath?: string;             // optional custom wasm path
+  round?: number;                // optional rounding in compute (generally leave undefined)
 }
 
-type Dict = Record<string, any>;
+function unwrapIfcValue(v: any) {
+  // web-ifc wraps typed values: { value: number|string|boolean }
+  if (v == null) return v;
+  if (typeof v === "object" && "value" in v) return (v as any).value;
+  return v;
+}
 
-function asId(ref: any): number | undefined {
-  if (ref === null || ref === undefined) return undefined;
-  if (typeof ref === "number") return ref;
-  if (typeof ref === "object" && "value" in ref && typeof ref.value === "number") return ref.value;
-  const num = Number(ref);
-  return Number.isFinite(num) ? num : undefined;
-}
-function asStr(v: any): string | undefined {
-  if (v === null || v === undefined) return undefined;
-  if (typeof v === "string") return v;
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  if (typeof v === "object" && "value" in v) return String((v as any).value);
-  return undefined;
-}
-function asNum(v: any): number | undefined {
-  if (v === null || v === undefined) return undefined;
-  if (typeof v === "number") return v;
-  if (typeof v === "object" && "value" in v && typeof (v as any).value === "number") return (v as any).value;
-  const n = Number(v);
+function tryNumber(x: any): number | undefined {
+  const n = Number(x);
   return Number.isFinite(n) ? n : undefined;
 }
-function getVecIds(vec: any): number[] {
-  if (!vec || typeof vec.size !== "function" || typeof vec.get !== "function") return [];
-  const out: number[] = [];
-  const n = vec.size();
-  for (let i = 0; i < n; i++) out.push(vec.get(i));
-  return out;
-}
-function pickFirstDefined<T>(...candidates: (T | undefined)[]): T | undefined {
-  for (const c of candidates) if (c !== undefined) return c;
-  return undefined;
-}
-function pushKv(target: Dict, key: string, val: any) {
-  if (val === undefined || val === null) return;
-  target[key] = val;
-}
-function lowercaseSet(arr?: string[]) {
-  return new Set((arr || []).map((s) => s.toLowerCase().trim()).filter(Boolean));
-}
 
-async function collectRelsByProps(ifc: IfcAPI, modelID: number, elementId: number) {
-  const relIds = getVecIds(ifc.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES));
-  const hits: any[] = [];
-  for (const rid of relIds) {
-    const rel = ifc.GetLine(modelID, rid);
-    if (!rel) continue;
-    const related = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [];
-    const has = related.some((r: any) => asId(r) === elementId);
-    if (has) hits.push(rel);
-  }
-  return hits;
-}
-
-function readPropSingleValue(ifc: IfcAPI, modelID: number, pid: number) {
-  const p = ifc.GetLine(modelID, pid);
-  if (!p) return undefined as unknown as { name?: string; value?: any };
-  const name = asStr(p.Name);
-  const val = p.NominalValue && typeof p.NominalValue === "object" && "value" in p.NominalValue
-    ? (p.NominalValue as any).value
-    : p.NominalValue ?? p.Description ?? p.EnumerationValues ?? undefined;
-  return { name, value: val };
-}
-
-function readElementQuantities(ifc: IfcAPI, modelID: number, qtoId: number) {
-  const qto = ifc.GetLine(modelID, qtoId);
-  if (!qto) return { name: undefined as string | undefined, pairs: {} as Dict };
-  const qtoName = asStr(qto.Name);
-  const result: Dict = {};
-  const qIds: number[] = Array.isArray(qto.Quantities) ? qto.Quantities.map(asId).filter(Boolean) as number[] : [];
-  for (const qid of qIds) {
-    const q = qid ? ifc.GetLine(modelID, qid) : undefined;
-    if (!q) continue;
-    const qName = asStr(q.Name) || String(qid);
-    if (q.expressID && q.type === IFCQUANTITYAREA) {
-      const v = pickFirstDefined(asNum(q.AreaValue), asNum((q as any).Value), asNum((q as any).LengthValue));
-      pushKv(result, qName, v);
-    } else if (q.expressID && q.type === IFCQUANTITYVOLUME) {
-      const v = pickFirstDefined(asNum(q.VolumeValue), asNum((q as any).Value));
-      pushKv(result, qName, v);
-    } else {
-      const v = pickFirstDefined(
-        asNum((q as any).Value),
-        asNum((q as any).LengthValue),
-        asNum((q as any).AreaValue),
-        asNum((q as any).VolumeValue),
-      ) ?? asStr((q as any).Value);
-      pushKv(result, qName, v);
-    }
-  }
-  return { name: qtoName, pairs: result };
-}
-
-function readPropertySet(ifc: IfcAPI, modelID: number, psetId: number) {
-  const pset = ifc.GetLine(modelID, psetId);
-  if (!pset) return { name: undefined as string | undefined, pairs: {} as Dict };
-  const psetName = asStr(pset.Name);
-  const pairs: Dict = {};
-  const pIds: number[] = Array.isArray(pset.HasProperties) ? pset.HasProperties.map(asId).filter(Boolean) as number[] : [];
-  for (const pid of pIds) {
-    const prop = pid ? ifc.GetLine(modelID, pid) : undefined;
-    if (!prop) continue;
-    if (prop.type === IFCPROPERTYSINGLEVALUE) {
-      const r = readPropSingleValue(ifc, modelID, pid);
-      if (r?.name) pairs[r.name] = r.value;
-    } else {
-      const name = asStr((prop as any).Name) || String(pid);
-      const val =
-        pickFirstDefined(asStr((prop as any).NominalValue), asStr((prop as any).Description)) ??
-        (typeof (prop as any).NominalValue === "object" && (prop as any).NominalValue?.value);
-      if (name && val !== undefined) pairs[name] = val;
-    }
-  }
-  return { name: psetName, pairs };
-}
-
-/* ---------------- Geometry helpers ---------------- */
-
-type AV = { area: number; volume: number };
-
+// Triangle utilities
 function triArea(ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number) {
+  // 0.5 * |(b-a) x (c-a)|
   const abx = bx - ax, aby = by - ay, abz = bz - az;
   const acx = cx - ax, acy = cy - ay, acz = cz - az;
   const cxp = aby * acz - abz * acy;
@@ -146,181 +46,297 @@ function triArea(ax: number, ay: number, az: number, bx: number, by: number, bz:
   const czp = abx * acy - aby * acx;
   return 0.5 * Math.sqrt(cxp * cxp + cyp * cyp + czp * czp);
 }
+
 function triSignedVolume(ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number) {
-  // 1/6 * dot(a, cross(b, c))
+  // V = (a · (b × c)) / 6
   const cxp = by * cz - bz * cy;
   const cyp = bz * cx - bx * cz;
   const czp = bx * cy - by * cx;
   return (ax * cxp + ay * cyp + az * czp) / 6.0;
 }
 
-function accumulateAreaVolumeFromBuffers(pos: Float32Array | number[], idx: Uint32Array | Uint16Array | number[]): AV {
-  let area = 0;
-  let vol = 0;
-  for (let i = 0; i < idx.length; i += 3) {
-    const i0 = idx[i] * 3, i1 = idx[i + 1] * 3, i2 = idx[i + 2] * 3;
-    const ax = pos[i0], ay = pos[i0 + 1], az = pos[i0 + 2];
-    const bx = pos[i1], by = pos[i1 + 1], bz = pos[i1 + 2];
-    const cx = pos[i2], cy = pos[i2 + 1], cz = pos[i2 + 2];
-    area += triArea(ax, ay, az, bx, by, bz, cx, cy, cz);
-    vol += triSignedVolume(ax, ay, az, bx, by, bz, cx, cy, cz);
-  }
-  return { area, volume: Math.abs(vol) }; // falls Orientierung uneinheitlich ist
+function applyMatrix(v: [number, number, number], m?: Float32Array | number[]) {
+  if (!m) return v;
+  // 4x4 row-major from web-ifc; apply affine
+  const x = v[0], y = v[1], z = v[2];
+  const nx = m[0] * x + m[4] * y + m[8]  * z + m[12];
+  const ny = m[1] * x + m[5] * y + m[9]  * z + m[13];
+  const nz = m[2] * x + m[6] * y + m[10] * z + m[14];
+  return [nx, ny, nz] as [number, number, number];
 }
 
-/**
- * Streamt alle IfcSpace-Meshes einmal und berechnet je ExpressID die Summe aus Fläche/Volumen.
- * Hinweis: web-ifc hat hier je nach Version leicht unterschiedliche Membernamen → defensiv (any).
- */
-function computeGeometryQTOForSpaces(ifc: IfcAPI, modelID: number): Map<number, AV> {
-  const acc = new Map<number, AV>();
-  const api: any = ifc as any;
-
-  if (typeof api.StreamAllMeshes !== "function" || typeof api.GetGeometry !== "function" || typeof api.GetArray !== "function") {
-    // API nicht verfügbar → leer
-    return acc;
-  }
-
-  api.StreamAllMeshes(
-    modelID,
-    (mesh: any) => {
-      try {
-        const expressID: number = mesh.expressID ?? mesh.ExpressID ?? mesh.id;
-        const geomRef = mesh.geometry ?? mesh.geometryExpressID ?? mesh.geometryID;
-        if (expressID == null || geomRef == null) return;
-
-        const geom = api.GetGeometry(modelID, geomRef);
-        if (!geom) return;
-
-        const vertPtr = geom.GetVertexData();
-        const vertSize = geom.GetVertexDataSize();
-        const idxPtr = geom.GetIndexData();
-        const idxSize = geom.GetIndexDataSize();
-
-        const pos = api.GetArray(vertPtr, vertSize) as Float32Array;
-        const idx = api.GetArray(idxPtr, idxSize) as Uint32Array;
-
-        const res = accumulateAreaVolumeFromBuffers(pos, idx);
-        const prev = acc.get(expressID);
-        if (prev) {
-          acc.set(expressID, { area: prev.area + res.area, volume: prev.volume + res.volume });
-        } else {
-          acc.set(expressID, res);
-        }
-      } catch {
-        /* skip silently */
-      }
-    },
-    [IFCSPACE] // nur Spaces streamen
-  );
-
-  return acc;
-}
-
-/* ---------------- Main runner ---------------- */
-
-export async function runQtoOnIFC(buffer: Buffer | Uint8Array, opts: QtoOptions = {}) {
-  const ifc = new IfcAPI();
-  await ifc.Init();
-
-  const modelID = ifc.OpenModel(buffer as any);
+async function initIfcApi(wasmPath?: string) {
+  const api = new IfcAPI();
   try {
-    const spaceIds = getVecIds(ifc.GetLineIDsWithType(modelID, IFCSPACE));
+    // Some versions expose SetWasmPath; some resolve from bundle.
+    (api as any).SetWasmPath?.(wasmPath || path.join(__dirname, "web-ifc.wasm"));
+  } catch { /* no-op */ }
+  await api.Init();
+  return api;
+}
 
-    const allRows: Dict[] = [];
-    const wantAll = !!opts.allParameters;
-    const extraSet = lowercaseSet(opts.extraParameters);
+function openModel(api: IfcAPI, buffer: Buffer) {
+  // Node Buffer -> ArrayBuffer
+  const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  // Use settings that help geometry
+  const settings = {
+    COORDINATE_TO_ORIGIN: true,
+    USE_FAST_BOOLS: true,
+    CIRCLE_SEGMENTS: 14,
+    // Force index type if available in your web-ifc version:
+    // FORCE_32BIT_INDICES: true,
+  } as any;
+  return api.OpenModel(ab, settings);
+}
 
-    // Geometrie-Map lazy berechnen (nur wenn benötigt)
-    let geomMap: Map<number, AV> | null = null;
-    const ensureGeom = () => {
-      if (!geomMap) geomMap = computeGeometryQTOForSpaces(ifc, modelID);
-      return geomMap!;
-    };
+function readNameAndLongName(api: IfcAPI, modelID: number, eid: number) {
+  const el: any = api.GetLine(modelID, eid);
+  return {
+    Name: unwrapIfcValue(el?.Name),
+    LongName: unwrapIfcValue(el?.LongName),
+    GlobalId: unwrapIfcValue(el?.GlobalId),
+    Tag: unwrapIfcValue(el?.Tag),
+  };
+}
 
-    for (const sid of spaceIds) {
-      const s = ifc.GetLine(modelID, sid);
-      if (!s) continue;
+function collectPropsForElement(api: IfcAPI, modelID: number, eid: number) {
+  const out: Dict = {};
+  // Find relations RelDefinesByProperties that target the element
+  const relIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
+  for (let i = 0; i < relIds.size(); i++) {
+    const rid = relIds.get(i);
+    const rel: any = api.GetLine(modelID, rid);
+    const related = rel?.RelatedObjects || rel?.RelatedObject; // IFC4/2x3
+    let match = false;
+    if (Array.isArray(related)) {
+      match = related.some((r: any) => unwrapIfcValue(r?.value) === eid);
+    } else if (related?.value === eid) match = true;
+    if (!match) continue;
 
-      const base: Dict = { ExpressID: sid };
-      pushKv(base, "GlobalId", asStr(s.GlobalId));
-      pushKv(base, "Name", asStr(s.Name));
-      pushKv(base, "LongName", asStr(s.LongName));
-      pushKv(base, "Description", asStr(s.Description));
-      pushKv(base, "ObjectType", asStr(s.ObjectType));
-      pushKv(base, "Tag", asStr(s.Tag));
+    const propSetRef = rel?.RelatingPropertyDefinition;
+    const psetId = unwrapIfcValue(propSetRef?.value);
+    if (!psetId) continue;
 
-      const rels = await collectRelsByProps(ifc, modelID, sid);
+    const pset: any = api.GetLine(modelID, psetId);
+    if (!pset) continue;
 
-      const flatAll: Dict = {};
-      let areaFromQto: number | undefined;
-      let volumeFromQto: number | undefined;
+    // IfcPropertySet -> HasProperties (SingleValue etc.)
+    if (pset?.type === IFCPROPERTYSET || pset?.HasProperties) {
+      const props = pset.HasProperties ?? [];
+      for (const pr of props) {
+        const pid = unwrapIfcValue(pr?.value);
+        if (!pid) continue;
+        const p: any = api.GetLine(modelID, pid);
+        const pname = unwrapIfcValue(p?.Name);
+        let pval: any = undefined;
 
-      for (const rel of rels) {
-        const propDefId = asId(rel.RelatingPropertyDefinition);
-        if (!propDefId) continue;
-        const pd = ifc.GetLine(modelID, propDefId);
-        if (!pd) continue;
-
-        if (pd.type === IFCELEMENTQUANTITY) {
-          const { name: qName, pairs } = readElementQuantities(ifc, modelID, propDefId);
-          const candArea = pickFirstDefined(
-            asNum(pairs["NetFloorArea"]),
-            asNum(pairs["GrossFloorArea"]),
-            asNum(pairs["Area"]),
-          );
-          const candVol = pickFirstDefined(
-            asNum(pairs["NetVolume"]),
-            asNum(pairs["GrossVolume"]),
-            asNum(pairs["Volume"]),
-          );
-          areaFromQto = areaFromQto ?? candArea;
-          volumeFromQto = volumeFromQto ?? candVol;
-
-          if (qName) {
-            for (const [k, v] of Object.entries(pairs)) flatAll[`${qName}.${k}`] = v;
-          } else {
-            for (const [k, v] of Object.entries(pairs)) flatAll[k] = v;
-          }
-        } else if (pd.type === IFCPROPERTYSET) {
-          const { name: pName, pairs } = readPropertySet(ifc, modelID, propDefId);
-          for (const [k, v] of Object.entries(pairs)) {
-            const keyFlat = pName ? `${pName}.${k}` : k;
-            flatAll[keyFlat] = v;
-            if (extraSet.has(k.toLowerCase())) base[k] = v;
-          }
+        if (p?.type === IFCPROPERTYSINGLEVALUE) {
+          pval = unwrapIfcValue(p?.NominalValue);
+        } else {
+          pval = unwrapIfcValue(p?.NominalValue) ?? unwrapIfcValue(p?.EnumerationValues);
         }
+        if (pname) out[pname] = pval;
       }
-
-      // Geometrie anwenden (force oder fallback)
-      let geoArea: number | undefined;
-      let geoVol: number | undefined;
-      if (opts.geometryForce || (opts.geometryFallback && (areaFromQto === undefined || volumeFromQto === undefined))) {
-        const g = ensureGeom().get(sid);
-        if (g) {
-          geoArea = g.area;
-          geoVol = g.volume;
-        }
-      }
-
-      // Priorität: geometryForce ? Geo : QTO → Fallback Geo → undefined
-      const area = opts.geometryForce ? geoArea ?? areaFromQto : (areaFromQto ?? geoArea);
-      const volume = opts.geometryForce ? geoVol ?? volumeFromQto : (volumeFromQto ?? geoVol);
-
-      if (area !== undefined) base["Area"] = area;
-      if (volume !== undefined) base["Volume"] = volume;
-
-      if (wantAll) {
-        for (const [k, v] of Object.entries(flatAll)) {
-          if (base[k] === undefined) base[k] = v;
-        }
-      }
-
-      allRows.push(base);
     }
 
-    return allRows;
+    // IfcElementQuantity -> Quantities (Area/Volume etc.)
+    if (pset?.type === IFCELEMENTQUANTITY || pset?.Quantities) {
+      const quants = pset.Quantities ?? [];
+      for (const qref of quants) {
+        const qid = unwrapIfcValue(qref?.value);
+        if (!qid) continue;
+        const q: any = api.GetLine(modelID, qid);
+        const qname = unwrapIfcValue(q?.Name);
+        if (!qname) continue;
+
+        if (q?.type === IFCQUANTITYAREA) {
+          const val = tryNumber(unwrapIfcValue(q?.AreaValue));
+          if (val !== undefined) out[qname] = val;
+          // Also set generic aliases if meaningful
+          if (qname.toLowerCase().includes("area") && out["Area"] == null) out["Area"] = val;
+        } else if (q?.type === IFCQUANTITYVOLUME) {
+          const val = tryNumber(unwrapIfcValue(q?.VolumeValue));
+          if (val !== undefined) out[qname] = val;
+          if (qname.toLowerCase().includes("volume") && out["Volume"] == null) out["Volume"] = val;
+        } else {
+          // Other quantities
+          const known =
+            unwrapIfcValue(q?.LengthValue) ??
+            unwrapIfcValue(q?.CountValue) ??
+            unwrapIfcValue(q?.WeightValue);
+          if (known != null) out[qname] = known;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// --- Geometry (mesh) collection & metrics -----------------------------------
+
+type MeshBundle = {
+  expressID: number;
+  indices: Uint32Array | Uint16Array;
+  vertices: Float32Array;
+  matrix?: Float32Array;
+};
+
+function collectMeshesForSpaces(api: IfcAPI, modelID: number, targetIds: Set<number>): MeshBundle[] {
+  const meshes: MeshBundle[] = [];
+  // web-ifc exposes streaming helpers on api as any in Node
+  const a: any = api as any;
+
+  if (typeof a.StreamAllMeshes !== "function") {
+    return meshes; // geometry not available in this runtime
+  }
+
+  a.StreamAllMeshes(modelID, (m: any) => {
+    // m.expressID: product express id
+    const id = m.expressID ?? m.id;
+    if (!targetIds.has(id)) return;
+
+    // geometry data
+    const geom = m.geometry;
+    const verts: Float32Array = a.GetVertexData(geom);
+    const inds: Uint32Array | Uint16Array = a.GetIndexData(geom);
+    const transform: Float32Array | undefined = m.flatTransformation || m.transformation;
+
+    meshes.push({
+      expressID: id,
+      vertices: verts,
+      indices: inds,
+      matrix: transform,
+    });
+  });
+
+  return meshes;
+}
+
+function areaVolumeFromMesh(vertices: Float32Array, indices: Uint32Array | Uint16Array, matrix?: Float32Array) {
+  let area = 0;
+  let vol = 0;
+
+  for (let i = 0; i < indices.length; i += 3) {
+    const ia = indices[i] * 3;
+    const ib = indices[i + 1] * 3;
+    const ic = indices[i + 2] * 3;
+
+    const a = applyMatrix([vertices[ia], vertices[ia + 1], vertices[ia + 2]], matrix);
+    const b = applyMatrix([vertices[ib], vertices[ib + 1], vertices[ib + 2]], matrix);
+    const c = applyMatrix([vertices[ic], vertices[ic + 1], vertices[ic + 2]], matrix);
+
+    area += triArea(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+    vol += triSignedVolume(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+  }
+
+  return { area, volume: Math.abs(vol) };
+}
+
+function roundN(v: any, n?: number) {
+  if (typeof v !== "number" || !Number.isFinite(v) || n == null) return v;
+  const f = Math.pow(10, n);
+  return Math.round(v * f) / f;
+}
+
+export async function runQtoOnIFC(buffer: Buffer, options: QtoOptions = {}): Promise<Dict[]> {
+  const { wasmPath, allParameters, select, rename, useGeometryFallback, forceGeometry, round } = options;
+
+  const api = await initIfcApi(wasmPath);
+  const modelID = openModel(api, buffer);
+
+  try {
+    // collect spaces
+    const ids = api.GetLineIDsWithType(modelID, IFCSPACE);
+    const spaceIds: number[] = [];
+    for (let i = 0; i < ids.size(); i++) spaceIds.push(ids.get(i));
+    const targetSet = new Set(spaceIds);
+
+    // Prepare geometry if requested / needed
+    let meshesById: Map<number, MeshBundle[]> | undefined;
+    const needGeom = forceGeometry || useGeometryFallback;
+    if (needGeom) {
+      const collected = collectMeshesForSpaces(api, modelID, targetSet);
+      meshesById = new Map<number, MeshBundle[]>();
+      for (const m of collected) {
+        const arr = meshesById.get(m.expressID) || [];
+        arr.push(m);
+        meshesById.set(m.expressID, arr);
+      }
+    }
+
+    const rows: Dict[] = [];
+
+    for (const eid of spaceIds) {
+      const base = readNameAndLongName(api, modelID, eid);
+      const props = collectPropsForElement(api, modelID, eid);
+
+      // Select extras
+      if (Array.isArray(select)) {
+        for (const key of select) {
+          if (base[key] == null && props[key] != null) {
+            base[key] = props[key];
+          } else if (base[key] == null) {
+            // try from raw element
+            const el: any = api.GetLine(modelID, eid);
+            const v = unwrapIfcValue(el?.[key]);
+            if (v != null) base[key] = v;
+          }
+        }
+      }
+
+      // Initial Area/Volume from quantities if available
+      let area = tryNumber(props["Area"] ?? props["NetArea"] ?? props["GrossFloorArea"]);
+      let volume = tryNumber(props["Volume"] ?? props["NetVolume"] ?? props["GrossVolume"]);
+
+      // Geometry fallback / force
+      if (forceGeometry || (useGeometryFallback && (area == null || volume == null))) {
+        const bundles = meshesById?.get(eid) ?? [];
+        let gArea = 0, gVol = 0;
+        for (const b of bundles) {
+          const { area: a, volume: v } = areaVolumeFromMesh(b.vertices, b.indices, b.matrix);
+          gArea += a;
+          gVol += v;
+        }
+        if (Number.isFinite(gArea) && gArea > 0) area = gArea;
+        if (Number.isFinite(gVol) && gVol > 0) volume = gVol;
+      }
+
+      const row: Dict = {
+        GlobalId: base.GlobalId,
+        Name: base.Name,
+        LongName: base.LongName,
+        Tag: base.Tag,
+        Area: roundN(area, round),
+        Volume: roundN(volume, round),
+      };
+
+      if (allParameters) {
+        // merge all props (don’t overwrite Area/Volume already set)
+        for (const [k, v] of Object.entries(props)) {
+          if (row[k] == null) row[k] = v;
+        }
+      } else if (Array.isArray(select)) {
+        for (const k of select) {
+          if (props[k] != null && row[k] == null) row[k] = props[k];
+        }
+      }
+
+      // Rename keys if requested
+      if (rename && Object.keys(rename).length) {
+        for (const [oldKey, newKey] of Object.entries(rename)) {
+          if (oldKey in row) {
+            row[newKey] = row[oldKey];
+            delete row[oldKey];
+          }
+        }
+      }
+
+      rows.push(row);
+    }
+
+    return rows;
   } finally {
-    try { ifc.CloseModel(modelID); } catch {}
+    api.CloseModel(modelID);
+    (api as any).Dispose?.();
   }
 }
