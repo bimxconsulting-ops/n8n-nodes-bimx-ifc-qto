@@ -1,342 +1,218 @@
 // src/lib/compute.ts
-import path from "path";
-import { IfcAPI } from "web-ifc";
+import * as path from 'path';
+import * as fs from 'fs';
+import * as WebIFC from 'web-ifc';
 
-// Web-IFC numeric constants are not exported as enums in typings, so use hard values:
-const IFCSPACE = 27; // IFC2x3 & IFC4: IfcSpace type id (stable in web-ifc)
-const IFCRELDEFINESBYPROPERTIES = 418;
-const IFCPROPERTYSET = 157;
-const IFCRELDEFINESBYTYPE = 419;
-const IFCELEMENTQUANTITY = 144;
-const IFCPROPERTYSINGLEVALUE = 147;
-const IFCQUANTITYAREA = 103;
-const IFCQUANTITYVOLUME = 109;
-
-type Dict<T = any> = Record<string, T>;
-
-export interface QtoOptions {
-  allParameters?: boolean;
-  select?: string[];             // extra property names to pull if present
-  rename?: Dict<string>;         // output key renames {old: new}
-  useGeometryFallback?: boolean; // if no QTO/PSets area/volume -> try geometry
-  forceGeometry?: boolean;       // always compute geometry (even if QTO exists)
-  wasmPath?: string;             // optional custom wasm path
-  round?: number;                // optional rounding in compute (generally leave undefined)
-}
-
-function unwrapIfcValue(v: any) {
-  // web-ifc wraps typed values: { value: number|string|boolean }
-  if (v == null) return v;
-  if (typeof v === "object" && "value" in v) return (v as any).value;
-  return v;
-}
-
-function tryNumber(x: any): number | undefined {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-// Triangle utilities
-function triArea(ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number) {
-  // 0.5 * |(b-a) x (c-a)|
-  const abx = bx - ax, aby = by - ay, abz = bz - az;
-  const acx = cx - ax, acy = cy - ay, acz = cz - az;
-  const cxp = aby * acz - abz * acy;
-  const cyp = abz * acx - abx * acz;
-  const czp = abx * acy - aby * acx;
-  return 0.5 * Math.sqrt(cxp * cxp + cyp * cyp + czp * czp);
-}
-
-function triSignedVolume(ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number) {
-  // V = (a · (b × c)) / 6
-  const cxp = by * cz - bz * cy;
-  const cyp = bz * cx - bx * cz;
-  const czp = bx * cy - by * cx;
-  return (ax * cxp + ay * cyp + az * czp) / 6.0;
-}
-
-function applyMatrix(v: [number, number, number], m?: Float32Array | number[]) {
-  if (!m) return v;
-  // 4x4 row-major from web-ifc; apply affine
-  const x = v[0], y = v[1], z = v[2];
-  const nx = m[0] * x + m[4] * y + m[8]  * z + m[12];
-  const ny = m[1] * x + m[5] * y + m[9]  * z + m[13];
-  const nz = m[2] * x + m[6] * y + m[10] * z + m[14];
-  return [nx, ny, nz] as [number, number, number];
-}
-
-async function initIfcApi(wasmPath?: string) {
-  const api = new IfcAPI();
-  try {
-    // Some versions expose SetWasmPath; some resolve from bundle.
-    (api as any).SetWasmPath?.(wasmPath || path.join(__dirname, "web-ifc.wasm"));
-  } catch { /* no-op */ }
-  await api.Init();
-  return api;
-}
-
-function openModel(api: IfcAPI, buffer: Buffer) {
-  // Node Buffer -> ArrayBuffer
-  const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-  // Use settings that help geometry
-  const settings = {
-    COORDINATE_TO_ORIGIN: true,
-    USE_FAST_BOOLS: true,
-    CIRCLE_SEGMENTS: 14,
-    // Force index type if available in your web-ifc version:
-    // FORCE_32BIT_INDICES: true,
-  } as any;
-  return api.OpenModel(ab, settings);
-}
-
-function readNameAndLongName(api: IfcAPI, modelID: number, eid: number) {
-  const el: any = api.GetLine(modelID, eid);
-  return {
-    Name: unwrapIfcValue(el?.Name),
-    LongName: unwrapIfcValue(el?.LongName),
-    GlobalId: unwrapIfcValue(el?.GlobalId),
-    Tag: unwrapIfcValue(el?.Tag),
-  };
-}
-
-function collectPropsForElement(api: IfcAPI, modelID: number, eid: number) {
-  const out: Dict = {};
-  // Find relations RelDefinesByProperties that target the element
-  const relIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
-  for (let i = 0; i < relIds.size(); i++) {
-    const rid = relIds.get(i);
-    const rel: any = api.GetLine(modelID, rid);
-    const related = rel?.RelatedObjects || rel?.RelatedObject; // IFC4/2x3
-    let match = false;
-    if (Array.isArray(related)) {
-      match = related.some((r: any) => unwrapIfcValue(r?.value) === eid);
-    } else if (related?.value === eid) match = true;
-    if (!match) continue;
-
-    const propSetRef = rel?.RelatingPropertyDefinition;
-    const psetId = unwrapIfcValue(propSetRef?.value);
-    if (!psetId) continue;
-
-    const pset: any = api.GetLine(modelID, psetId);
-    if (!pset) continue;
-
-    // IfcPropertySet -> HasProperties (SingleValue etc.)
-    if (pset?.type === IFCPROPERTYSET || pset?.HasProperties) {
-      const props = pset.HasProperties ?? [];
-      for (const pr of props) {
-        const pid = unwrapIfcValue(pr?.value);
-        if (!pid) continue;
-        const p: any = api.GetLine(modelID, pid);
-        const pname = unwrapIfcValue(p?.Name);
-        let pval: any = undefined;
-
-        if (p?.type === IFCPROPERTYSINGLEVALUE) {
-          pval = unwrapIfcValue(p?.NominalValue);
-        } else {
-          pval = unwrapIfcValue(p?.NominalValue) ?? unwrapIfcValue(p?.EnumerationValues);
-        }
-        if (pname) out[pname] = pval;
-      }
-    }
-
-    // IfcElementQuantity -> Quantities (Area/Volume etc.)
-    if (pset?.type === IFCELEMENTQUANTITY || pset?.Quantities) {
-      const quants = pset.Quantities ?? [];
-      for (const qref of quants) {
-        const qid = unwrapIfcValue(qref?.value);
-        if (!qid) continue;
-        const q: any = api.GetLine(modelID, qid);
-        const qname = unwrapIfcValue(q?.Name);
-        if (!qname) continue;
-
-        if (q?.type === IFCQUANTITYAREA) {
-          const val = tryNumber(unwrapIfcValue(q?.AreaValue));
-          if (val !== undefined) out[qname] = val;
-          // Also set generic aliases if meaningful
-          if (qname.toLowerCase().includes("area") && out["Area"] == null) out["Area"] = val;
-        } else if (q?.type === IFCQUANTITYVOLUME) {
-          const val = tryNumber(unwrapIfcValue(q?.VolumeValue));
-          if (val !== undefined) out[qname] = val;
-          if (qname.toLowerCase().includes("volume") && out["Volume"] == null) out["Volume"] = val;
-        } else {
-          // Other quantities
-          const known =
-            unwrapIfcValue(q?.LengthValue) ??
-            unwrapIfcValue(q?.CountValue) ??
-            unwrapIfcValue(q?.WeightValue);
-          if (known != null) out[qname] = known;
-        }
-      }
-    }
-  }
-  return out;
-}
-
-// --- Geometry (mesh) collection & metrics -----------------------------------
-
-type MeshBundle = {
-  expressID: number;
-  indices: Uint32Array | Uint16Array;
-  vertices: Float32Array;
-  matrix?: Float32Array;
+type Opts = {
+  allParams?: boolean;
+  useGeometry?: boolean;
+  forceGeometry?: boolean;
+  extraParams?: string[];
+  renameMap?: Record<string, string>;
+  round?: number;
 };
 
-function collectMeshesForSpaces(api: IfcAPI, modelID: number, targetIds: Set<number>): MeshBundle[] {
-  const meshes: MeshBundle[] = [];
-  // web-ifc exposes streaming helpers on api as any in Node
-  const a: any = api as any;
+const val = (x: any) => (x && typeof x === 'object' && 'value' in x ? x.value : x);
+const num = (x: any) => {
+  const v = val(x);
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
 
-  if (typeof a.StreamAllMeshes !== "function") {
-    return meshes; // geometry not available in this runtime
+function renameKeys(row: Record<string, any>, map: Record<string, string>) {
+  for (const [from, to] of Object.entries(map)) {
+    if (from in row) {
+      row[to] = row[from];
+      delete row[from];
+    }
   }
-
-  a.StreamAllMeshes(modelID, (m: any) => {
-    // m.expressID: product express id
-    const id = m.expressID ?? m.id;
-    if (!targetIds.has(id)) return;
-
-    // geometry data
-    const geom = m.geometry;
-    const verts: Float32Array = a.GetVertexData(geom);
-    const inds: Uint32Array | Uint16Array = a.GetIndexData(geom);
-    const transform: Float32Array | undefined = m.flatTransformation || m.transformation;
-
-    meshes.push({
-      expressID: id,
-      vertices: verts,
-      indices: inds,
-      matrix: transform,
-    });
-  });
-
-  return meshes;
+  return row;
 }
 
-function areaVolumeFromMesh(vertices: Float32Array, indices: Uint32Array | Uint16Array, matrix?: Float32Array) {
-  let area = 0;
-  let vol = 0;
-
-  for (let i = 0; i < indices.length; i += 3) {
-    const ia = indices[i] * 3;
-    const ib = indices[i + 1] * 3;
-    const ic = indices[i + 2] * 3;
-
-    const a = applyMatrix([vertices[ia], vertices[ia + 1], vertices[ia + 2]], matrix);
-    const b = applyMatrix([vertices[ib], vertices[ib + 1], vertices[ib + 2]], matrix);
-    const c = applyMatrix([vertices[ic], vertices[ic + 1], vertices[ic + 2]], matrix);
-
-    area += triArea(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-    vol += triSignedVolume(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+function polygonArea2D(points: Array<{ x: number; y: number }>) {
+  // Shoelace
+  if (points.length < 3) return 0;
+  let s = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    s += a.x * b.y - b.x * a.y;
   }
-
-  return { area, volume: Math.abs(vol) };
+  return Math.abs(s / 2);
 }
 
-function roundN(v: any, n?: number) {
-  if (typeof v !== "number" || !Number.isFinite(v) || n == null) return v;
-  const f = Math.pow(10, n);
-  return Math.round(v * f) / f;
+function findWasmDir() {
+  // dist/lib/compute.js -> dist/wasm/web-ifc.wasm
+  const wasmDir = path.join(__dirname, '..', 'wasm');
+  const wasmFile = path.join(wasmDir, 'web-ifc.wasm');
+  return fs.existsSync(wasmFile) ? wasmDir : undefined;
 }
 
-export async function runQtoOnIFC(buffer: Buffer, options: QtoOptions = {}): Promise<Dict[]> {
-  const { wasmPath, allParameters, select, rename, useGeometryFallback, forceGeometry, round } = options;
-
-  const api = await initIfcApi(wasmPath);
-  const modelID = openModel(api, buffer);
-
+async function openModel(ifcApi: WebIFC.IfcAPI, data: Uint8Array) {
+  const wasmDir = findWasmDir();
+  // web-ifc Versionen unterscheiden sich: versuche SetWasmPath falls vorhanden
   try {
-    // collect spaces
-    const ids = api.GetLineIDsWithType(modelID, IFCSPACE);
-    const spaceIds: number[] = [];
-    for (let i = 0; i < ids.size(); i++) spaceIds.push(ids.get(i));
-    const targetSet = new Set(spaceIds);
+    if (wasmDir && typeof (ifcApi as any).SetWasmPath === 'function') {
+      (ifcApi as any).SetWasmPath(wasmDir);
+    }
+  } catch {}
+  await ifcApi.Init();
+  const modelID = ifcApi.OpenModel(data, { COORDINATE_TO_ORIGIN: true });
+  return modelID;
+}
 
-    // Prepare geometry if requested / needed
-    let meshesById: Map<number, MeshBundle[]> | undefined;
-    const needGeom = forceGeometry || useGeometryFallback;
-    if (needGeom) {
-      const collected = collectMeshesForSpaces(api, modelID, targetSet);
-      meshesById = new Map<number, MeshBundle[]>();
-      for (const m of collected) {
-        const arr = meshesById.get(m.expressID) || [];
-        arr.push(m);
-        meshesById.set(m.expressID, arr);
+function extractPsetsAndQuantities(
+  ifcApi: WebIFC.IfcAPI,
+  modelID: number,
+  space: any,
+  opts: Opts,
+  row: Record<string, any>
+) {
+  let area: number | undefined;
+  let volume: number | undefined;
+
+  const inv = space.IsDefinedBy || [];
+  for (const invRef of inv) {
+    const rel = ifcApi.GetLine(modelID, invRef.value, true);
+    if (!rel?.RelatingPropertyDefinition) continue;
+    const pdef = ifcApi.GetLine(modelID, rel.RelatingPropertyDefinition.value, true);
+    if (!pdef) continue;
+
+    // IfcElementQuantity -> Quantities (IfcQuantityArea / IfcQuantityVolume)
+    if (pdef.type === WebIFC.IFCENTITYENUM.IFCELEMENTQUANTITY || pdef.GlobalId) {
+      const qs = pdef.Quantities || [];
+      for (const qRef of qs) {
+        const q = ifcApi.GetLine(modelID, qRef.value, true);
+        if (!q) continue;
+        if (q.type === WebIFC.IFCENTITYENUM.IFCQUANTITYAREA && area === undefined) {
+          area = num(q.AreaValue);
+          if (opts.allParams) row[q.Name?.value || 'IfcQuantityArea'] = area;
+        } else if (q.type === WebIFC.IFCENTITYENUM.IFCQUANTITYVOLUME && volume === undefined) {
+          volume = num(q.VolumeValue);
+          if (opts.allParams) row[q.Name?.value || 'IfcQuantityVolume'] = volume;
+        }
       }
     }
 
-    const rows: Dict[] = [];
+    // IfcPropertySet -> IfcPropertySingleValue
+    if (pdef.type === WebIFC.IFCENTITYENUM.IFCPROPERTYSET) {
+      const props = pdef.HasProperties || [];
+      for (const pRef of props) {
+        const prop = ifcApi.GetLine(modelID, pRef.value, true);
+        if (!prop) continue;
+        const pname = prop.Name?.value;
+        const nval = prop.NominalValue ? val(prop.NominalValue) : undefined;
 
-    for (const eid of spaceIds) {
-      const base = readNameAndLongName(api, modelID, eid);
-      const props = collectPropsForElement(api, modelID, eid);
+        if (opts.allParams && pname) row[pname] = nval;
 
-      // Select extras
-      if (Array.isArray(select)) {
-        for (const key of select) {
-          if (base[key] == null && props[key] != null) {
-            base[key] = props[key];
-          } else if (base[key] == null) {
-            // try from raw element
-            const el: any = api.GetLine(modelID, eid);
-            const v = unwrapIfcValue(el?.[key]);
-            if (v != null) base[key] = v;
+        // ExtraParams: nur auf Wunsch sicherstellen
+        if (opts.extraParams?.includes(pname)) row[pname] = nval;
+
+        // Manche Modelle speichern Area/Volume als Pset-Value
+        if (area === undefined && /area/i.test(pname ?? '') && typeof nval === 'number') area = nval;
+        if (volume === undefined && /volume|volumen/i.test(pname ?? '') && typeof nval === 'number') volume = nval;
+      }
+    }
+  }
+
+  if (area !== undefined) row['Area'] = area;
+  if (volume !== undefined) row['Volume'] = volume;
+}
+
+function geometryFromExtrusion(ifcApi: WebIFC.IfcAPI, modelID: number, space: any) {
+  // Sehr verbreitet: IfcExtrudedAreaSolid
+  const repRef = space.Representation;
+  if (!repRef?.value) return { area: undefined, volume: undefined };
+
+  const repDef = ifcApi.GetLine(modelID, repRef.value, true);
+  const reps = repDef?.Representations || [];
+  for (const rRef of reps) {
+    const r = ifcApi.GetLine(modelID, rRef.value, true);
+    const items = r?.Items || [];
+    for (const itRef of items) {
+      const item = ifcApi.GetLine(modelID, itRef.value, true);
+      if (!item) continue;
+
+      if (item.type === WebIFC.IFCENTITYENUM.IFCEXTRUDEDAREASOLID) {
+        const depth = num(item.Depth) ?? 0;
+        const swept = item.SweptArea ? ifcApi.GetLine(modelID, item.SweptArea.value, true) : null;
+
+        // Rechteckprofil
+        if (swept?.type === WebIFC.IFCENTITYENUM.IFCRECTANGLEPROFILEDEF) {
+          const x = num(swept.XDim) ?? 0;
+          const y = num(swept.YDim) ?? 0;
+          const a = x * y;
+          return { area: a, volume: a * depth };
+        }
+
+        // Beliebiges geschlossenes Profil mit IfcPolyline
+        if (
+          swept?.type === WebIFC.IFCENTITYENUM.IFCARBITRARYCLOSEDPROFILEDEF &&
+          swept.OuterCurve?.value
+        ) {
+          const oc = ifcApi.GetLine(modelID, swept.OuterCurve.value, true);
+          if (oc?.type === WebIFC.IFCENTITYENUM.IFCPOLYLINE) {
+            const pts: Array<{ x: number; y: number }> = [];
+            for (const pRef of oc.Points || []) {
+              const p = ifcApi.GetLine(modelID, pRef.value, true);
+              const xs = p.Coordinates?.[0] ? num(p.Coordinates[0]) : 0;
+              const ys = p.Coordinates?.[1] ? num(p.Coordinates[1]) : 0;
+              pts.push({ x: xs ?? 0, y: ys ?? 0 });
+            }
+            const a = polygonArea2D(pts);
+            return { area: a, volume: a * depth };
           }
         }
       }
+    }
+  }
+  return { area: undefined, volume: undefined };
+}
 
-      // Initial Area/Volume from quantities if available
-      let area = tryNumber(props["Area"] ?? props["NetArea"] ?? props["GrossFloorArea"]);
-      let volume = tryNumber(props["Volume"] ?? props["NetVolume"] ?? props["GrossVolume"]);
+export async function runQtoOnIFC(
+  buffer: Buffer,
+  opts: Opts = {}
+): Promise<Array<Record<string, any>>> {
+  const ifcApi = new WebIFC.IfcAPI();
+  const modelID = await openModel(ifcApi, new Uint8Array(buffer));
 
-      // Geometry fallback / force
-      if (forceGeometry || (useGeometryFallback && (area == null || volume == null))) {
-        const bundles = meshesById?.get(eid) ?? [];
-        let gArea = 0, gVol = 0;
-        for (const b of bundles) {
-          const { area: a, volume: v } = areaVolumeFromMesh(b.vertices, b.indices, b.matrix);
-          gArea += a;
-          gVol += v;
-        }
-        if (Number.isFinite(gArea) && gArea > 0) area = gArea;
-        if (Number.isFinite(gVol) && gVol > 0) volume = gVol;
-      }
+  try {
+    const ids = ifcApi.GetLineIDsWithType(modelID, WebIFC.IFCENTITYENUM.IFCSPACE);
+    const rows: Array<Record<string, any>> = [];
 
-      const row: Dict = {
-        GlobalId: base.GlobalId,
-        Name: base.Name,
-        LongName: base.LongName,
-        Tag: base.Tag,
-        Area: roundN(area, round),
-        Volume: roundN(volume, round),
+    for (let i = 0; i < ids.size(); i++) {
+      const id = ids.get(i);
+      const space = ifcApi.GetLine(modelID, id, true);
+      if (!space) continue;
+
+      const row: Record<string, any> = {
+        GlobalId: space.GlobalId?.value,
+        Name: space.Name?.value ?? null,
+        LongName: space.LongName?.value ?? null,
       };
 
-      if (allParameters) {
-        // merge all props (don’t overwrite Area/Volume already set)
-        for (const [k, v] of Object.entries(props)) {
-          if (row[k] == null) row[k] = v;
-        }
-      } else if (Array.isArray(select)) {
-        for (const k of select) {
-          if (props[k] != null && row[k] == null) row[k] = props[k];
-        }
+      // 1) Psets/Quantities
+      extractPsetsAndQuantities(ifcApi, modelID, space, opts, row);
+
+      // 2) Geometrie-Fallback
+      const needGeom =
+        !!opts.forceGeometry ||
+        (!!opts.useGeometry && (row['Area'] === undefined || row['Volume'] === undefined));
+
+      if (needGeom) {
+        const g = geometryFromExtrusion(ifcApi, modelID, space);
+        if (row['Area'] === undefined && g.area !== undefined) row['Area'] = g.area;
+        if (row['Volume'] === undefined && g.volume !== undefined) row['Volume'] = g.volume;
       }
 
-      // Rename keys if requested
-      if (rename && Object.keys(rename).length) {
-        for (const [oldKey, newKey] of Object.entries(rename)) {
-          if (oldKey in row) {
-            row[newKey] = row[oldKey];
-            delete row[oldKey];
-          }
-        }
-      }
+      // 3) Rename
+      if (opts.renameMap) renameKeys(row, opts.renameMap);
 
       rows.push(row);
     }
 
     return rows;
   } finally {
-    api.CloseModel(modelID);
-    (api as any).Dispose?.();
+    ifcApi.CloseModel(modelID);
   }
 }
