@@ -25,11 +25,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node.js
+      - name: Detect lockfile
+        id: lock
+        run: |
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ] || [ -f yarn.lock ]; then
+            echo "has_lock=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_lock=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Mit Cache, wenn Lockfile vorhanden
+      - name: Use Node.js (cached)
+        if: steps.lock.outputs.has_lock == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
           cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      # Ohne Cache, wenn kein Lockfile vorhanden
+      - name: Use Node.js (no cache)
+        if: steps.lock.outputs.has_lock != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
           registry-url: "https://registry.npmjs.org"
 
       - name: Verify tag matches package.json version (if running on a tag)
@@ -68,6 +87,4 @@ jobs:
         if: ${{ !inputs.dryRun }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          # --access public is idempotent; it's required the first publish, harmless later
-          npm publish --access public
+        run: npm publish --access public
