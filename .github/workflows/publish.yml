@@ -1,24 +1,33 @@
-name: Build & Publish n8n Node
+name: build-publish
 
 on:
-  workflow_dispatch:
   push:
     tags:
-      - "v*.*.*"
+      - 'v*'             # läuft bei Tag-Push z.B. v0.1.21
+  release:
+    types: [published]   # läuft wenn du im UI auf "Publish release" klickst
+  workflow_dispatch:
 
 jobs:
-  build-publish:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
 
       - run: npm install
       - run: npm run build
       - run: npm pack
+      - run: npm ci
 
       - name: Publish to npm
         if: startsWith(github.ref, 'refs/tags/')
