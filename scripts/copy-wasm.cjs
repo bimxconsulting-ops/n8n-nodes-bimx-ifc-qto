@@ -1,17 +1,15 @@
 const fs = require("fs");
 const path = require("path");
 
-// 1) Den von Node aufgelösten Haupteinstieg von web-ifc finden
-const entry = require.resolve("web-ifc"); // z. B. .../node_modules/web-ifc/web-ifc-api.js
+const entry = require.resolve("web-ifc"); // e.g. .../node_modules/web-ifc/web-ifc-api.js
 const base = path.dirname(entry);
 
-// 2) Mögliche Orte der WASM-Datei (je nach web-ifc-Version / Build)
 const candidates = [
   path.join(base, "web-ifc.wasm"),
   path.join(base, "dist", "web-ifc.wasm"),
   path.join(base, "..", "web-ifc.wasm"),
   path.join(base, "..", "dist", "web-ifc.wasm"),
-  path.join(base, "..", "lib", "web-ifc.wasm"),
+  path.join(base, "..", "lib", "web-ifc.wasm")
 ];
 
 const src = candidates.find(p => fs.existsSync(p));
