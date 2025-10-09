@@ -31,8 +31,14 @@ function val(x: any): any {
 }
 
 // flaches Objekt zusammenführen (A ← B), ohne Prototypen
-function assignFlat<A extends Record<string, any>, B extends Record<string, any>>(a: A, b: B) {
-  for (const [k, v] of Object.entries(b)) a[k] = v;
+// (Cast auf Record<string, any>, um TS2862 zu vermeiden)
+function assignFlat<A extends object, B extends object>(a: A, b: B): A & B {
+  const target = a as unknown as Record<string, any>;
+  const source = b as unknown as Record<string, any>;
+  for (const [k, v] of Object.entries(source)) {
+    target[k] = v;
+  }
+  return a as A & B;
 }
 
 // (einfaches) Flatten eines IFC-Lines-Objekts zu Key→Value
@@ -48,10 +54,8 @@ function flattenIfcObject(o: any, out: Record<string, any>, prefix = '') {
       if ('value' in (v as any) && typeof (v as any).value !== 'object') {
         out[key] = (v as any).value;
       } else if (Array.isArray(v)) {
-        // einfache Arrays abbilden
         out[key] = v.map((it: any) => val(it));
       } else {
-        // tiefer gehen
         flattenIfcObject(v, out, key);
       }
     } else {
@@ -70,8 +74,6 @@ function readQtoAreaVolumeFromPsets(
   let area: number | undefined;
   let volume: number | undefined;
 
-  // Alle RelDefinesByProperties durchgehen und nur die Relationen nehmen,
-  // deren RelatedObjects das aktuelle Space referenzieren.
   const relIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
   const it = relIds[Symbol.iterator]();
   for (let r = it.next(); !r.done; r = it.next()) {
@@ -128,7 +130,6 @@ function collectAllParamsForSpace(
     const tmp: Record<string, any> = {};
     flattenIfcObject(def, tmp);
 
-    // zusammenführen (Key-Kollisionen zuletzt schreibend, bewusst simpel)
     assignFlat(out, tmp);
   }
 
@@ -169,33 +170,30 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
         LongName: val(space?.LongName),
       };
 
-      // Pset/QTO: zuerst Werte aus IFC-Quantities
+      // Pset/QTO zuerst
       const q = readQtoAreaVolumeFromPsets(api, modelID, id);
       if (q.area !== undefined) row.Area = q.area;
       if (q.volume !== undefined) row.Volume = q.volume;
 
-      // Alle Parameter einsammeln?
+      // alle Parameter?
       if (allParams) {
         const all = collectAllParamsForSpace(api, modelID, space);
-        // Basiswerte überstimmen (GlobalId/Name/LongName behalten)
         assignFlat(row, all);
-        // Nochmal sicherstellen, dass "schöne" Basisschlüssel oben bleiben
         row.GlobalId = val(space?.GlobalId);
         row.Name = val(space?.Name);
         row.LongName = val(space?.LongName);
       }
 
-      // Extra-Parameter gezielt auslesen (falls nicht schon vorhanden)
+      // extra Parameter?
       for (const p of extraParams) {
         if (!p) continue;
         if (row[p] !== undefined) continue;
-        // primitive Suche im Space-Objekt
         const tmp: Record<string, any> = {};
         flattenIfcObject(space, tmp);
         if (tmp[p] !== undefined) row[p] = tmp[p];
       }
 
-      // Geometrie (Footprint/Volumen) – je nach Option (force/ fallback)
+      // Geometrie (Footprint/Volumen)
       if (forceGeometry || (useGeometry && (row.Area === undefined || row.Volume === undefined))) {
         const gv = getSpaceAreaVolume(api as any, modelID, id);
         if (forceGeometry || row.Area === undefined) {
@@ -206,7 +204,7 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
         }
       }
 
-      // Rename anwenden
+      // Rename
       for (const [oldKey, newKey] of Object.entries(renameMap)) {
         if (oldKey in row) {
           row[newKey] = row[oldKey];
@@ -219,7 +217,7 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
 
     return rows;
   } finally {
-    // Modell sauber schließen – KEIN api.Dispose() im Node-API!
+    // Modell schließen – KEIN api.Dispose() im Node-API!
     api.CloseModel(modelID);
   }
 }
