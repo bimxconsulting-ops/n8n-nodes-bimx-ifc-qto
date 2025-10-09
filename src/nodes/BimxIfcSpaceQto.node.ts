@@ -1,6 +1,8 @@
-import { IExecuteFunctions, INodeType, INodeTypeDescription, NodeOperationError } from 'n8n-workflow';
+// src/nodes/BimxIfcSpaceQto.node.ts
+import type { IExecuteFunctions, INodeType, INodeTypeDescription } from 'n8n-workflow';
+import { NodeOperationError } from 'n8n-workflow';
 import * as XLSX from 'xlsx';
-import { runQtoOnIFC } from '../lib/compute';
+import { runQtoOnIFC, type QtoOptions } from '../lib/compute';
 
 interface ExtraParam { paramName: string }
 interface RenameMap { parameterName: string; newName: string }
@@ -118,7 +120,7 @@ export class BimxIfcSpaceQto implements INodeType {
         extraParams,
         renameMap,
         round,
-      });
+      } as QtoOptions);
 
       // Rundung auf alle numerischen Felder anwenden
       const roundVal = (v: any) => (typeof v === 'number' ? Number(v.toFixed(round)) : v);
