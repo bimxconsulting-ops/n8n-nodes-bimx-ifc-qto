@@ -6,39 +6,23 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<DEIN-ORG>/<DEIN-REPO>.git"
+    "url": "git+https://github.com/DEIN-ORG/DEIN-REPO.git"
   },
-  "keywords": [
-    "n8n",
-    "n8n-community-node",
-    "ifc",
-    "web-ifc",
-    "bim",
-    "qto"
-  ],
+  "keywords": ["n8n","n8n-community-node","ifc","web-ifc","bim","qto"],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": [
-    "dist/**/*",
-    "README.md"
-  ],
+  "files": ["dist/**/*","README.md","LICENSE"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist",
+    "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
     "lint": "echo \"(optional) add eslint here\""
   },
-  "engines": {
-    "node": ">=18"
-  },
+  "engines": { "node": ">=18" },
   "n8n": {
     "nodes": [
-      {
-        "type": "dist/nodes/BimxIfcSpaceQto.node.js"
-      },
-      {
-        "type": "dist/nodes/IfcParameterExplorer.node.js"
-      }
+      { "type": "node", "name": "dist/nodes/BimxIfcSpaceQto.node.js" },
+      { "type": "node", "name": "dist/nodes/IfcParameterExplorer.node.js" }
     ]
   },
   "dependencies": {
