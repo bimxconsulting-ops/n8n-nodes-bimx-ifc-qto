@@ -14,9 +14,7 @@ import {
   IFCRELDEFINESBYPROPERTIES,
 } from 'web-ifc';
 
-// <- von nodes/ eine Ebene hoch zu utils/
 import { toBuffer } from '../utils/toBuffer';
-
 
 export class IfcParameterExplorer implements INodeType {
   description: INodeTypeDescription = {
@@ -60,7 +58,8 @@ export class IfcParameterExplorer implements INodeType {
         throw new Error(`Binary property "${binName}" nicht gefunden.`);
       }
 
-      const buf = toBuffer(binary.data, binary.fileType || 'application/octet-stream');
+      // <-- nur 1 Argument
+      const buf = toBuffer(binary.data);
 
       const api = new IfcAPI();
       await api.Init();
@@ -70,7 +69,7 @@ export class IfcParameterExplorer implements INodeType {
         // 1) RelDefines Index
         const byRelated = new Map<number, any[]>();
         const relVec = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
-        const size = relVec.size ? relVec.size() : 0;
+        const size = typeof relVec?.size === 'function' ? relVec.size() : 0;
         for (let k = 0; k < size; k++) {
           const relId = relVec.get(k);
           const rel = api.GetLine(modelID, relId);
@@ -88,7 +87,7 @@ export class IfcParameterExplorer implements INodeType {
         // 2) Sammeln
         const keys = new Map<string, any[]>(); // name -> samples[]
         const spaceVec = api.GetLineIDsWithType(modelID, IFCSPACE);
-        const n = spaceVec.size ? spaceVec.size() : 0;
+        const n = typeof spaceVec?.size === 'function' ? spaceVec.size() : 0;
 
         const toPrim = (v: any) => {
           let x = v;
@@ -107,9 +106,9 @@ export class IfcParameterExplorer implements INodeType {
           const id = spaceVec.get(k);
           const sp = api.GetLine(modelID, id);
 
-          // Space.* (ein paar sinnvolle Felder, erweitere bei Bedarf)
+          // Space.* (erweiterbar)
           ['Name','LongName','ObjectType','Description','Tag','Number','ElevationWithFlooring'].forEach(attr => {
-            const val = toPrim(sp?.[attr]);
+            const val = toPrim(sp?.[attr as keyof typeof sp]);
             if (val != null) pushKey(`Space.${attr}`, val);
           });
 
@@ -142,9 +141,14 @@ export class IfcParameterExplorer implements INodeType {
 
         // 3) Ausgabe: ein Item pro Key
         for (const [name, samples] of keys) {
-          out.push({ json: { name, sample: samples?.[0] ?? null, type: name.startsWith('Space.') ? 'space' : (name.startsWith('Qto_') ? 'qto' : 'pset') } });
+          out.push({
+            json: {
+              name,
+              sample: samples?.[0] ?? null,
+              type: name.startsWith('Space.') ? 'space' : (name.startsWith('Qto_') ? 'qto' : 'pset'),
+            },
+          });
         }
-
       } finally {
         try { api.CloseModel(modelID); } catch {}
       }
