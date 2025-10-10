@@ -12,19 +12,26 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": ["dist/**/*", "README.md", "LICENSE"],
-  "scripts": {
-    "build": "tsc -p tsconfig.json && node ./scripts/copy-assets.cjs",
-    "clean": "rimraf dist",
-    "prepare": "npm run build",
-    "lint": "echo \"(optional) add eslint here\""
-  },
-  "engines": { "node": ">=18" },
+
   "n8n": {
+    "n8nNodesApiVersion": "1",
     "nodes": [
-      { "type": "dist/nodes/BimxIfcSpaceQto.node.js" },
-      { "type": "dist/nodes/IfcParameterExplorer.node.js" }
+      {
+        "name": "BimxIfcSpaceQto.node.js",
+        "type": "n8n-nodes-bimx-ifc-qto/dist/nodes/BimxIfcSpaceQto.node.js"
+      },
+      {
+        "name": "IfcParameterExplorer.node.js",
+        "type": "n8n-nodes-bimx-ifc-qto/dist/nodes/IfcParameterExplorer.node.js"
+      }
     ]
   },
+
+  "scripts": {
+    "build": "rimraf dist && tsc -p tsconfig.json && node ./scripts/copy-assets.cjs && node ./scripts/copy-wasm.cjs",
+    "prepublishOnly": "npm run build"
+  },
+
   "dependencies": {
     "web-ifc": "^0.0.51",
     "xlsx": "^0.18.5"
