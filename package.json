@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
   "author": "BIM X",
   "license": "MIT",
