@@ -18,12 +18,13 @@ import { toBuffer } from '../utils/toBuffer';
 
 export class IfcParameterExplorer implements INodeType {
   description: INodeTypeDescription = {
-    displayName: 'IFC Parameter Explorer',
+    displayName: 'BIM X – IFC Parameter Explorer',
     name: 'ifcParameterExplorer',
+    icon: 'file:BIMX.svg',
     group: ['transform'],
     version: 1,
     description: 'Listet alle Parameter-Schlüssel aus IfcSpace (Space.*, Pset_*, Qto_*)',
-    defaults: { name: 'IFC Parameter Explorer' },
+    defaults: { name: 'BIM X – IFC Parameter Explorer' },
     inputs: ['main'],
     outputs: ['main'],
     properties: [
@@ -58,7 +59,6 @@ export class IfcParameterExplorer implements INodeType {
         throw new Error(`Binary property "${binName}" nicht gefunden.`);
       }
 
-      // <-- nur 1 Argument
       const buf = toBuffer(binary.data);
 
       const api = new IfcAPI();
@@ -66,11 +66,11 @@ export class IfcParameterExplorer implements INodeType {
       const modelID = api.OpenModel(new Uint8Array(buf));
 
       try {
-        // 1) RelDefines Index
+        // --- RelDefines indexieren ---
         const byRelated = new Map<number, any[]>();
         const relVec = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
-        const size = typeof relVec?.size === 'function' ? relVec.size() : 0;
-        for (let k = 0; k < size; k++) {
+        const relSize = typeof relVec?.size === 'function' ? relVec.size() : 0;
+        for (let k = 0; k < relSize; k++) {
           const relId = relVec.get(k);
           const rel = api.GetLine(modelID, relId);
           const related = rel?.RelatedObjects ?? [];
@@ -84,10 +84,9 @@ export class IfcParameterExplorer implements INodeType {
           }
         }
 
-        // 2) Sammeln
-        const keys = new Map<string, any[]>(); // name -> samples[]
-        const spaceVec = api.GetLineIDsWithType(modelID, IFCSPACE);
-        const n = typeof spaceVec?.size === 'function' ? spaceVec.size() : 0;
+        // --- Keys sammeln ---
+        type Entry = { group: string; prop: string; type: 'space' | 'pset' | 'qto'; samples: any[] };
+        const keys = new Map<string, Entry>(); // fullName -> entry
 
         const toPrim = (v: any) => {
           let x = v;
@@ -96,22 +95,27 @@ export class IfcParameterExplorer implements INodeType {
           return x;
         };
 
-        const pushKey = (name: string, sample: any) => {
-          if (!keys.has(name)) keys.set(name, []);
-          const arr = keys.get(name)!;
-          if (arr.length < maxExamples && sample !== undefined) arr.push(sample);
+        const add = (fullName: string, group: string, prop: string, type: Entry['type'], val: any) => {
+          if (!keys.has(fullName)) keys.set(fullName, { group, prop, type, samples: [] });
+          const e = keys.get(fullName)!;
+          if (e.samples.length < maxExamples && val !== undefined) e.samples.push(val);
         };
+
+        const spaceVec = api.GetLineIDsWithType(modelID, IFCSPACE);
+        const n = typeof spaceVec?.size === 'function' ? spaceVec.size() : 0;
 
         for (let k = 0; k < n; k++) {
           const id = spaceVec.get(k);
           const sp = api.GetLine(modelID, id);
 
-          // Space.* (erweiterbar)
-          ['Name','LongName','ObjectType','Description','Tag','Number','ElevationWithFlooring'].forEach(attr => {
+          // Space.*
+          const spaceAttrs = ['Name','LongName','ObjectType','Description','Tag','Number','ElevationWithFlooring'];
+          for (const attr of spaceAttrs) {
             const val = toPrim(sp?.[attr as keyof typeof sp]);
-            if (val != null) pushKey(`Space.${attr}`, val);
-          });
+            if (val != null) add(`Space.${attr}`, 'Space', attr, 'space', val);
+          }
 
+          // Pset + Qto
           const defs = byRelated.get(id) ?? [];
           for (const def of defs) {
             if (def?.type === IFCPROPERTYSET) {
@@ -121,7 +125,7 @@ export class IfcParameterExplorer implements INodeType {
                 const pl = api.GetLine(modelID, pid);
                 const nm = toPrim(pl?.Name);
                 const val = toPrim(pl?.NominalValue ?? pl?.NominalValue?.value ?? pl?.value);
-                if (nm) pushKey(`${setName}.${nm}`, val);
+                if (nm) add(`${setName}.${nm}`, setName, nm, 'pset', val);
               }
             } else if (def?.type === IFCELEMENTQUANTITY) {
               const qName = toPrim(def?.Name) ?? 'Qto';
@@ -133,19 +137,23 @@ export class IfcParameterExplorer implements INodeType {
                 const vol  = toPrim(ql?.VolumeValue);
                 const len  = toPrim(ql?.LengthValue ?? ql?.PerimeterValue);
                 const val = area ?? vol ?? len ?? null;
-                if (nm) pushKey(`${qName}.${nm}`, val);
+                if (nm) add(`${qName}.${nm}`, qName, nm, 'qto', val);
               }
             }
           }
         }
 
-        // 3) Ausgabe: ein Item pro Key
-        for (const [name, samples] of keys) {
+        // Ausgabe: 1 Item pro Key
+        for (const [fullName, e] of keys) {
           out.push({
             json: {
-              name,
-              sample: samples?.[0] ?? null,
-              type: name.startsWith('Space.') ? 'space' : (name.startsWith('Qto_') ? 'qto' : 'pset'),
+              // für QTO-Node:
+              name: fullName,        // z.B. "Pset_SpaceCommon.WallCovering"
+              prop: e.prop,          // z.B. "WallCovering"  <= nur das Leaf
+              label: e.prop,         // Alias für prop
+              group: e.group,        // "Space" | "Pset_SpaceCommon" | "Qto_SpaceBaseQuantities" ...
+              type: e.type,          // 'space' | 'pset' | 'qto'
+              sample: e.samples?.[0] ?? null,
             },
           });
         }
