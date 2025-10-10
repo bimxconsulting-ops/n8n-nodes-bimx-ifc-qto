@@ -2,469 +2,479 @@
 
 import {
   IfcAPI,
+  // Typkonstanten
   IFCSPACE,
-  IFCPROJECT,
-  IFCBUILDINGSTOREY,
   IFCRELDEFINESBYPROPERTIES,
-  IFCRELCONTAINEDINSPATIALSTRUCTURE,
-  IFCPROPERTYSET,
-  IFCPROPERTYSINGLEVALUE,
   IFCELEMENTQUANTITY,
-  IFCQUANTITYAREA,
-  IFCQUANTITYVOLUME,
+  IFCPROPERTYSET,
+  IFCRELAGGREGATES,
+  IFCBUILDINGSTOREY,
+  IFCPROJECT,
 } from 'web-ifc';
 
-import { footprintAreaXY, meshVolume } from './mesh-math';
+import { getSpaceAreaVolume } from './mesh-math';
 
-/* --------------------------------- Optionen -------------------------------- */
+/* -------------------------------------------------------------------------- */
+/*                                   Optionen                                 */
+/* -------------------------------------------------------------------------- */
 
 export interface QtoOptions {
-  allParams?: boolean;
-  useGeometry?: boolean;     // Fallback nur, wenn keine QTO-Werte gefunden
-  forceGeometry?: boolean;   // Geometrie erzwingen (überschreibt QTO)
-  extraParams?: string[];
-  renameMap?: Record<string, string>;
-  round?: number;
-  // Performance-Schalter:
-  triangleLimit?: number;         // globales Triangellimit, default 3 Mio
-  firstMeshPerSpace?: boolean;    // nur erstes Mesh je Space verwenden
+  allParams?: boolean;              // alle PropertySets/Quantities exportieren
+  useGeometry?: boolean;            // Geometrie-Fallback erlauben (Mesh/Extrusion)
+  forceGeometry?: boolean;          // Geometrie-Werte erzwingen (über Pset-Werte)
+  extraParams?: string[];           // zusätzliche Feldpfade (z.B. "Space.Number")
+  renameMap?: Record<string, string>; // Spalten umbenennen
+  round?: number;                   // Dezimalstellen zum Runden
 }
 
-/* ------------------------------ Utility-Helper ------------------------------ */
+/* -------------------------------------------------------------------------- */
+/*                                   Helpers                                  */
+/* -------------------------------------------------------------------------- */
 
-function unwrapNominal(v: any): any {
-  if (v == null) return v;
-  if (typeof v === 'object' && 'value' in v) return (v as any).value;
+// defensiv runden
+function roundIf(v: any, digits?: number) {
+  if (v == null || !isFinite(Number(v)) || digits == null) return v;
+  const f = Math.pow(10, digits);
+  return Math.round(Number(v) * f) / f;
+}
+
+// generisches Unwrapping von IFC-Werten -> primitiv (string/number/bool)
+function toPrimitive(val: any): any {
+  let v = val;
+  // häufig: { value: X }
+  while (v && typeof v === 'object' && 'value' in v && Object.keys(v).length === 1) {
+    v = v.value;
+  }
+  // manche IFC-Werte sind erneut verschachtelt
+  if (v && typeof v === 'object' && 'value' in v && typeof v.value !== 'object') {
+    v = v.value;
+  }
   return v;
 }
 
-function setIfDefined(obj: Record<string, any>, key: string, val: any) {
-  if (val !== undefined && val !== null) obj[key] = val;
+// einfache Param-Setzung mit optionalem Überschreiben (force)
+function setIfEmpty(row: Record<string, any>, key: string, value: any, force = false) {
+  if (value == null) return;
+  if (force || row[key] == null) row[key] = value;
 }
 
-function applyMatrix4ToVerts(vs: Float32Array, m: number[] | Float32Array) {
-  if (!m || (m as any).length !== 16) return vs;
-  const out = new Float32Array(vs.length);
-
-  const m00 = +m[0],  m01 = +m[1],  m02 = +m[2];
-  const m10 = +m[4],  m11 = +m[5],  m12 = +m[6];
-  const m20 = +m[8],  m21 = +m[9],  m22 = +m[10];
-  const m30 = +m[12], m31 = +m[13], m32 = +m[14];
-
-  for (let i = 0; i < vs.length; i += 3) {
-    const x = vs[i], y = vs[i + 1], z = vs[i + 2];
-    out[i]     = m00 * x + m10 * y + m20 * z + m30;
-    out[i + 1] = m01 * x + m11 * y + m21 * z + m31;
-    out[i + 2] = m02 * x + m12 * y + m22 * z + m32;
-  }
-  return out;
-}
-
-function toUint32Any(iArr: any): Uint32Array {
-  if (iArr instanceof Uint32Array) return iArr;
-  // inkl. Uint16Array/Int32Array etc.
-  const len = iArr?.length ?? (iArr?.byteLength ? (iArr.byteLength / 4) : 0);
-  const out = new Uint32Array(len);
-  for (let i = 0; i < len; i++) out[i] = Number(iArr[i] ?? 0);
-  return out;
-}
-
-function roundIf(val: number | undefined, digits?: number) {
-  if (val == null || digits == null) return val;
-  const p = Math.pow(10, digits);
-  return Math.round(val * p) / p;
-}
-
-/* ----------------------- Relationen/Metadaten indizieren ------------------- */
-
-function buildRelDefinesIndex(api: any, modelID: number) {
-  const map = new Map<number, number[]>();
-  const ids = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
-  const it = ids[Symbol.iterator]();
-  for (let r = it.next(); !r.done; r = it.next()) {
-    const rid = r.value as number;
-    const rel = api.GetLine(modelID, rid);
-    const defId = rel?.RelatingPropertyDefinition?.value;
-    if (!defId) continue;
-    const related = rel?.RelatedObjects;
-    if (!Array.isArray(related)) continue;
-    for (const ro of related) {
-      const eid = ro?.value;
-      if (eid || eid === 0) {
-        if (!map.has(eid)) map.set(eid, []);
-        map.get(eid)!.push(defId);
-      }
+// Rename Map anwenden
+function applyRename(row: Record<string, any>, rename?: Record<string, string>) {
+  if (!rename) return;
+  for (const [oldKey, newKey] of Object.entries(rename)) {
+    if (oldKey in row) {
+      row[newKey] = row[oldKey];
+      if (newKey !== oldKey) delete row[oldKey];
     }
   }
-  return map;
 }
 
-function buildRelContainedIndex(api: any, modelID: number) {
-  const map = new Map<number, number>();
-  const ids = api.GetLineIDsWithType(modelID, IFCRELCONTAINEDINSPATIALSTRUCTURE);
-  const it = ids[Symbol.iterator]();
-  for (let r = it.next(); !r.done; r = it.next()) {
-    const rid = r.value as number;
-    const rel = api.GetLine(modelID, rid);
-    const structId = rel?.RelatingStructure?.value;
-    const elems = rel?.RelatedElements;
-    if (!structId || !Array.isArray(elems)) continue;
-    for (const e of elems) {
-      const eid = e?.value;
-      if (eid || eid === 0) map.set(eid, structId);
+/* -------------------------------------------------------------------------- */
+/*                          Relationen & Kontext (fast)                       */
+/* -------------------------------------------------------------------------- */
+
+// Baut child -> parent Map aus IfcRelAggregates
+function buildAggregatesIndex(api: any, modelID: number) {
+  const childToParent = new Map<number, number>();
+
+  const ids = api.GetLineIDsWithType(modelID, IFCRELAGGREGATES);
+  for (let it = ids[Symbol.iterator](), r = it.next(); !r.done; r = it.next()) {
+    const relId = r.value as number;
+    const rel = api.GetLine(modelID, relId);
+    const parent = rel?.RelatingObject?.value;
+    const children = rel?.RelatedObjects ?? [];
+    if (!parent || !Array.isArray(children)) continue;
+    for (const c of children) {
+      if (c?.value) childToParent.set(c.value, parent);
     }
   }
-  return map;
+  return childToParent;
 }
 
-function buildNameIndex(api: any, modelID: number, type: number) {
-  const map = new Map<number, { Name?: string; Elevation?: number }>();
-  const ids = api.GetLineIDsWithType(modelID, type);
-  const it = ids[Symbol.iterator]();
-  for (let r = it.next(); !r.done; r = it.next()) {
+function getNameMapForTypes(api: any, modelID: number, typeConst: number) {
+  const map = new Map<number, string>();
+  const ids = api.GetLineIDsWithType(modelID, typeConst);
+  for (let it = ids[Symbol.iterator](), r = it.next(); !r.done; r = it.next()) {
     const id = r.value as number;
-    const ent = api.GetLine(modelID, id);
-    const Name = unwrapNominal(ent?.Name);
-    const Elevation = unwrapNominal(ent?.Elevation);
-    map.set(id, { Name, Elevation });
+    const line = api.GetLine(modelID, id);
+    const nm = toPrimitive(line?.Name);
+    if (nm != null) map.set(id, nm);
   }
   return map;
 }
 
-function buildSpaceIdSet(api: any, modelID: number) {
-  const set = new Set<number>();
-  const ids = api.GetLineIDsWithType(modelID, IFCSPACE);
-  const it = ids[Symbol.iterator]();
-  for (let r = it.next(); !r.done; r = it.next()) set.add(r.value as number);
-  return set;
-}
-
-/* --------------- Geometrie nur für IfcSpaces einsammeln (robust) ----------- */
-
-type GeoStats = { area: number; volume: number; tris: number; minZ?: number; maxZ?: number };
-
-function consumeFlatMeshForSpace(
-  api: any,
-  modelID: number,
-  fm: any,
-  stats: GeoStats,
+function resolveStoreyAndProject(
+  childToParent: Map<number, number>,
+  storeyNames: Map<number, string>,
+  projectNames: Map<number, string>,
+  startId: number,
 ) {
-  if (!fm) return;
+  let cur: number | undefined = startId;
+  let storey: string | undefined;
+  let project: string | undefined;
 
-  // Geometrie-Handle(n)
-  const geomHandles: Array<{ geometryExpressID: number; matrix?: any }> = [];
-  const add = (x: any) => {
-    const gId = x?.geometryExpressID ?? x?.GeometryExpressID ?? x?.geomExpressID;
-    if (typeof gId === 'number') geomHandles.push({ geometryExpressID: gId, matrix: x?.matrix ?? x?.transformMatrix ?? x?.coordinationMatrix ?? x?.transform });
-  };
-
-  if (Array.isArray((fm as any).geometries)) {
-    for (const g of (fm as any).geometries) add(g);
-  } else {
-    add(fm);
+  const MAX_HOPS = 16;
+  let hops = 0;
+  while (cur != null && hops++ < MAX_HOPS) {
+    const parent = childToParent.get(cur);
+    if (parent == null) break;
+    if (!storey && storeyNames.has(parent)) storey = storeyNames.get(parent);
+    if (!project && projectNames.has(parent)) project = projectNames.get(parent);
+    cur = parent;
   }
-  if (geomHandles.length === 0) return;
-
-  for (const h of geomHandles) {
-    const geom: any = api.GetGeometry(modelID, h.geometryExpressID);
-    if (!geom) continue;
-
-    let verts: Float32Array = api.GetArray(geom.GetVertexData(), geom.GetVertexDataSize());
-    const iRaw: any         = api.GetArray(geom.GetIndexData(),  geom.GetIndexDataSize());
-    const idx: Uint32Array  = toUint32Any(iRaw);
-
-    const m =
-      (h.matrix && (h.matrix.length === 16)) ? h.matrix :
-      ((fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform) && (fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform).length === 16
-        ? (fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform)
-        : null);
-    if (m) verts = applyMatrix4ToVerts(verts, m);
-
-    // 2D-Footprint & Volumen
-    const a = footprintAreaXY(verts, idx);
-    const v = meshVolume(verts, idx);
-
-    // Z-Extents
-    let minZ = Number.POSITIVE_INFINITY;
-    let maxZ = Number.NEGATIVE_INFINITY;
-    for (let i = 2; i < verts.length; i += 3) {
-      const z = verts[i];
-      if (z < minZ) minZ = z;
-      if (z > maxZ) maxZ = z;
-    }
-
-    stats.area   += a;
-    stats.volume += v;
-    stats.tris   += idx.length / 3;
-    stats.minZ    = Math.min(stats.minZ ?? +Infinity, minZ);
-    stats.maxZ    = Math.max(stats.maxZ ?? -Infinity, maxZ);
-  }
+  return { storey, project };
 }
 
-function collectSpaceGeometry(
-  api: any,
-  modelID: number,
-  spaceIdSet: Set<number>,
-  opts: { triangleLimit: number; firstMeshPerSpace: boolean }
-) {
-  const { triangleLimit, firstMeshPerSpace } = opts;
-  const perSpace = new Map<number, GeoStats>();
-  let totalTris = 0;
+/* -------------------------------------------------------------------------- */
+/*                     All-Parameters: Psets & Quantities                     */
+/* -------------------------------------------------------------------------- */
 
-  // 1) Beste Option: pro Space-ID GetFlatMesh (keine allg. Streams → weniger Fehler/Overhead)
-  if (typeof api.GetFlatMesh === 'function') {
-    for (const sid of spaceIdSet) {
-      if (firstMeshPerSpace && perSpace.has(sid)) continue;
-      const stats: GeoStats = { area: 0, volume: 0, tris: 0 };
-      try {
-        const fm = api.GetFlatMesh(modelID, sid);
-        consumeFlatMeshForSpace(api, modelID, fm, stats);
-      } catch {
-        // ignorieren – einzelne Spaces dürfen fehlschlagen
-      }
-      if (stats.tris > 0) {
-        totalTris += stats.tris;
-        perSpace.set(sid, stats);
-        if (triangleLimit && totalTris > triangleLimit) break;
-      }
-    }
-    finalizeExtents(perSpace);
-    return perSpace;
-  }
-
-  // 2) Falls vorhanden: typ-gefiltertes Streaming nur für IFCSPACE
-  if (typeof (api as any).StreamAllMeshesOfType === 'function') {
-    try {
-      (api as any).StreamAllMeshesOfType(modelID, IFCSPACE, (fm: any) => {
-        const sid = fm?.expressID ?? fm?.ExpressID;
-        if (sid == null || !spaceIdSet.has(sid)) return;
-        if (firstMeshPerSpace && perSpace.has(sid)) return;
-
-        const stats = perSpace.get(sid) ?? { area: 0, volume: 0, tris: 0 };
-        consumeFlatMeshForSpace(api, modelID, fm, stats);
-
-        if (stats.tris > 0) {
-          perSpace.set(sid, stats);
-          totalTris += stats.tris;
-        }
-      });
-    } catch { /* noop */ }
-
-    finalizeExtents(perSpace);
-    return perSpace;
-  }
-
-  // 3) Letzter Fallback: alles laden und streng nach expressID filtern
-  const fms: any = api.LoadAllGeometry(modelID);
-  const size = typeof fms?.size === 'function' ? fms.size() : 0;
-
-  for (let i = 0; i < size; i++) {
-    const fm = fms.get(i);
-    const sid = fm?.expressID ?? fm?.ExpressID;
-    if (sid == null || !spaceIdSet.has(sid)) continue;
-    if (firstMeshPerSpace && perSpace.has(sid)) continue;
-
-    const stats = perSpace.get(sid) ?? { area: 0, volume: 0, tris: 0 };
-    consumeFlatMeshForSpace(api, modelID, fm, stats);
-
-    if (stats.tris > 0) {
-      perSpace.set(sid, stats);
-      totalTris += stats.tris;
-      if (triangleLimit && totalTris > triangleLimit) break;
-    }
-  }
-
-  finalizeExtents(perSpace);
-  return perSpace;
-}
-
-function finalizeExtents(perSpace: Map<number, GeoStats>) {
-  for (const [k, s] of perSpace) {
-    if (!isFinite(s.minZ!)) s.minZ = undefined;
-    if (!isFinite(s.maxZ!)) s.maxZ = undefined;
-  }
-}
-
-/* ------------------------- Property-/Quantity-Lesen ------------------------ */
-
-function collectAllParamsForSpace(
-  api: any,
-  modelID: number,
-  spaceId: number,
-  relDefinesIndex: Map<number, number[]>,
-) {
+function extractPsetProps(api: any, modelID: number, psetLine: any) {
+  // IfcPropertySet.HasProperties[]
   const out: Record<string, any> = {};
-
-  const defIds = relDefinesIndex.get(spaceId) ?? [];
-  for (const defId of defIds) {
-    const def = api.GetLine(modelID, defId);
-    if (!def) continue;
-
-    if (def.type === IFCPROPERTYSET) {
-      const psetName = unwrapNominal(def.Name) ?? `Pset_${defId}`;
-      const props = def.HasProperties;
-      if (Array.isArray(props)) {
-        for (const p of props) {
-          const pl = api.GetLine(modelID, p.value);
-          if (!pl) continue;
-          if (pl.type === IFCPROPERTYSINGLEVALUE) {
-            const pname = unwrapNominal(pl.Name);
-            const nval  = unwrapNominal(pl.NominalValue);
-            if (pname) out[`${psetName}.${pname}`] = nval;
-          } else {
-            const pname = unwrapNominal(pl.Name) || `Prop_${p.value}`;
-            const nv =
-              unwrapNominal((pl as any).NominalValue) ??
-              unwrapNominal((pl as any).LengthValue)  ??
-              unwrapNominal((pl as any).CountValue)   ??
-              unwrapNominal((pl as any).WeightValue)  ??
-              unwrapNominal((pl as any).TimeValue);
-            out[`${psetName}.${pname}`] = nv != null ? nv : { ...pl };
-          }
-        }
-      }
-    } else if (def.type === IFCELEMENTQUANTITY) {
-      if (Array.isArray(def.Quantities)) {
-        for (const q of def.Quantities) {
-          const ql = api.GetLine(modelID, q.value);
-          if (!ql) continue;
-          const qName = unwrapNominal(ql.Name);
-          if (ql.type === IFCQUANTITYAREA) {
-            const val = unwrapNominal(ql.AreaValue);
-            if (qName) out[qName] = val;
-            setIfDefined(out, 'Area', out['Area'] ?? val);
-          } else if (ql.type === IFCQUANTITYVOLUME) {
-            const val = unwrapNominal(ql.VolumeValue);
-            if (qName) out[qName] = val;
-            setIfDefined(out, 'Volume', out['Volume'] ?? val);
-          } else {
-            const nv =
-              unwrapNominal((ql as any).LengthValue) ??
-              unwrapNominal((ql as any).CountValue)  ??
-              unwrapNominal((ql as any).WeightValue) ??
-              unwrapNominal((ql as any).TimeValue);
-            if (qName && nv != null) out[qName] = nv;
-          }
-        }
-      }
-    } else {
-      const name = unwrapNominal(def.Name) ?? `Def_${defId}`;
-      out[name] = { ...def };
-    }
+  const pName = toPrimitive(psetLine?.Name) ?? 'Pset';
+  const props = psetLine?.HasProperties ?? [];
+  for (const p of props) {
+    const pid = p?.value;
+    if (!pid) continue;
+    const pl = api.GetLine(modelID, pid);
+    const nm = toPrimitive(pl?.Name);
+    if (!nm) continue;
+    // meist IfcPropertySingleValue.NominalValue
+    const val = toPrimitive(pl?.NominalValue ?? pl?.NominalValue?.value ?? pl?.value);
+    out[`${pName}.${nm}`] = val;
   }
-
   return out;
 }
 
-/* --------------------------------- EXPORT --------------------------------- */
+function extractQuantities(api: any, modelID: number, qtoLine: any) {
+  // IfcElementQuantity.Quantities[]
+  const out: Record<string, any> = {};
+  const qName = toPrimitive(qtoLine?.Name) ?? 'Qto';
+  const quants = qtoLine?.Quantities ?? [];
+  for (const q of quants) {
+    const qid = q?.value;
+    if (!qid) continue;
+    const ql = api.GetLine(modelID, qid);
+    const nm = toPrimitive(ql?.Name);
+    const area = toPrimitive(ql?.AreaValue);
+    const vol  = toPrimitive(ql?.VolumeValue);
+    const len  = toPrimitive(ql?.LengthValue ?? ql?.PerimeterValue);
+    if (nm) {
+      if (area != null) out[`${qName}.${nm}`] = area;
+      else if (vol != null) out[`${qName}.${nm}`] = vol;
+      else if (len != null) out[`${qName}.${nm}`] = len;
+    }
+  }
+  return out;
+}
+
+// Mappt RelatedObjectID -> Array<PropertyDefinitionLine>
+function buildRelDefinesIndex(api: any, modelID: number) {
+  const byRelated = new Map<number, any[]>();
+  const ids = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES);
+  for (let it = ids[Symbol.iterator](), r = it.next(); !r.done; r = it.next()) {
+    const relId = r.value as number;
+    const rel = api.GetLine(modelID, relId);
+    const related = rel?.RelatedObjects ?? [];
+    const defId = rel?.RelatingPropertyDefinition?.value;
+    if (!defId || !Array.isArray(related)) continue;
+    const defLine = api.GetLine(modelID, defId);
+    for (const ro of related) {
+      const rid = ro?.value;
+      if (!rid) continue;
+      if (!byRelated.has(rid)) byRelated.set(rid, []);
+      byRelated.get(rid)!.push(defLine);
+    }
+  }
+  return byRelated;
+}
+
+/* -------------------------------------------------------------------------- */
+/*            ExtrudedAreaSolid-Fallback (ohne Triangulator/Logs)             */
+/* -------------------------------------------------------------------------- */
+
+function polygonArea2D(pts: Array<{ x: number; y: number }>) {
+  let a = 0;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    a += (pts[j].x * pts[i].y) - (pts[i].x * pts[j].y);
+  }
+  return Math.abs(a) * 0.5;
+}
+
+function getPoint2DFromCartesian(api: any, modelID: number, id: number) {
+  const cp = api.GetLine(modelID, id);
+  const c = cp?.Coordinates;
+  const x = +((c?.[0]?.value) ?? 0);
+  const y = +((c?.[1]?.value) ?? 0);
+  return { x, y };
+}
+
+function areaOfPolylineProfile(api: any, modelID: number, polyId: number) {
+  const pl = api.GetLine(modelID, polyId);
+  const pts: Array<{ x: number; y: number }> = [];
+  for (const p of (pl?.Points ?? [])) {
+    if (p?.value) pts.push(getPoint2DFromCartesian(api, modelID, p.value));
+  }
+  if (pts.length >= 3) return polygonArea2D(pts);
+  return 0;
+}
+
+function areaOfRectangleProfile(api: any, modelID: number, rectId: number) {
+  const r = api.GetLine(modelID, rectId);
+  const x = +((r?.XDim?.value) ?? r?.XDim ?? 0);
+  const y = +((r?.YDim?.value) ?? r?.YDim ?? 0);
+  return Math.max(0, x) * Math.max(0, y);
+}
+
+function areaOfCircleProfile(api: any, modelID: number, circleId: number) {
+  const c = api.GetLine(modelID, circleId);
+  const r = +((c?.Radius?.value) ?? c?.Radius ?? 0);
+  return Math.PI * r * r;
+}
+
+// Profilsfläche (unterstützt Polyline/Rectangle/Circle/ArbitraryClosed/Composite)
+function areaOfProfile(api: any, modelID: number, profId: number): number {
+  const p = api.GetLine(modelID, profId);
+  if (!p) return 0;
+
+  switch (p.type) {
+    // IFCPOLYLINE (häufig direkt referenziert)
+    case 102:
+      return areaOfPolylineProfile(api, modelID, profId);
+    // IFCARBITRARYCLOSEDPROFILEDEF
+    case 32522: {
+      let A = 0;
+      const outer = p.OuterCurve?.value;
+      if (outer) {
+        const oc = api.GetLine(modelID, outer);
+        if (oc?.type === 102) A += areaOfPolylineProfile(api, modelID, outer);
+      }
+      const inners = p.InnerCurves ?? [];
+      for (const ic of inners) {
+        const id = ic?.value;
+        if (!id) continue;
+        const oc = api.GetLine(modelID, id);
+        if (oc?.type === 102) A -= areaOfPolylineProfile(api, modelID, id);
+      }
+      return A;
+    }
+    // IFCCOMPOSITEPROFILEDEF
+    case 1572748253: {
+      const subs = p.Profiles ?? [];
+      const areas: number[] = [];
+      for (const sp of subs) {
+        const sid = sp?.value;
+        if (!sid) continue;
+        areas.push(areaOfProfile(api, modelID, sid));
+      }
+      if (!areas.length) return 0;
+      areas.sort((a, b) => b - a);
+      const outer = areas[0];
+      const holes = areas.slice(1).reduce((s, v) => s + v, 0);
+      return Math.max(0, outer - holes);
+    }
+    // IFCRECTANGLEPROFILEDEF
+    case 3326135071:
+      return areaOfRectangleProfile(api, modelID, profId);
+    // IFCCIRCLEPROFILEDEF
+    case 100892965:
+      return areaOfCircleProfile(api, modelID, profId);
+    default:
+      return 0;
+  }
+}
+
+function getAxisPlacementZ(api: any, modelID: number, place: any): number | undefined {
+  const locId = place?.Location?.value;
+  if (!locId) return undefined;
+  const cp = api.GetLine(modelID, locId);
+  const c = cp?.Coordinates;
+  const z = +((c?.[2]?.value) ?? c?.[2] ?? 0);
+  return isFinite(z) ? z : undefined;
+}
+
+function computeExtrudedAreaSolid(api: any, modelID: number, item: any) {
+  // IfcExtrudedAreaSolid
+  const profId = item?.SweptArea?.value;
+  const depth = +((item?.Depth?.value) ?? item?.Depth ?? 0);
+  if (!profId || depth <= 0) return;
+
+  const A = areaOfProfile(api, modelID, profId);
+  if (A <= 0) return;
+
+  let baseZ: number | undefined;
+  let topZ: number | undefined;
+  const pos = item?.Position;
+  if (pos && pos.value) {
+    const plc = api.GetLine(modelID, pos.value);
+    baseZ = getAxisPlacementZ(api, modelID, plc);
+    if (baseZ != null) topZ = baseZ + depth;
+  }
+
+  return { area: A, volume: A * depth, base: baseZ, top: topZ };
+}
+
+function getSpaceAreaVolumeFromRepresentation(api: any, modelID: number, spaceId: number) {
+  const sp = api.GetLine(modelID, spaceId);
+  const rep = sp?.Representation?.value ? api.GetLine(modelID, sp.Representation.value) : null;
+  if (!rep || !Array.isArray(rep.Representations)) return;
+
+  let area = 0, volume = 0;
+  let base: number | undefined, top: number | undefined;
+
+  for (const r of rep.Representations) {
+    const rid = r?.value;
+    if (!rid) continue;
+    const sr = api.GetLine(modelID, rid);
+    const items = sr?.Items ?? [];
+    for (const it of items) {
+      const iid = it?.value;
+      if (!iid) continue;
+      const item = api.GetLine(modelID, iid);
+      // IFCEXTRUDEDAREASOLID
+      if (item?.type === 3591900460) {
+        const res = computeExtrudedAreaSolid(api, modelID, item);
+        if (res) {
+          area += res.area;
+          volume += res.volume;
+          if (res.base != null) base = (base == null) ? res.base : Math.min(base, res.base);
+          if (res.top  != null) top  = (top  == null) ? res.top  : Math.max(top,  res.top);
+        }
+      }
+    }
+  }
+  if (area > 0 || volume > 0) return { area, volume, base, top };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                   Hauptlogik                               */
+/* -------------------------------------------------------------------------- */
 
 export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
   const {
-    allParams,
-    useGeometry,
-    forceGeometry,
-    extraParams,
+    allParams = true,
+    useGeometry = true,
+    forceGeometry = false,
+    extraParams = [],
     renameMap,
     round,
-    triangleLimit = 3_000_000,
-    firstMeshPerSpace = false,
   } = opts;
 
   const api = new IfcAPI();
+
+  // In Node KEIN SetWasmPath! web-ifc findet web-ifc-node.wasm selbst.
   await api.Init();
 
-  // Buffer → Uint8Array korrekt mappen
-  const u8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const modelID = api.OpenModel(u8);
+  // Wichtig: Uint8Array übergeben
+  const modelID = api.OpenModel(new Uint8Array(buffer));
 
   try {
-    // Vorab-Indizes/Metadaten
-    const spaceIdSet       = buildSpaceIdSet(api as any, modelID);
-    const relDefinesIndex  = buildRelDefinesIndex(api as any, modelID);
-    const relContainedIdx  = buildRelContainedIndex(api as any, modelID);
-    const projectNames     = buildNameIndex(api as any, modelID, IFCPROJECT);
-    const storeyNames      = buildNameIndex(api as any, modelID, IFCBUILDINGSTOREY);
+    /* -------------------------- Vorindizes für Performance -------------------------- */
 
-    // Geometrie nur einmal für Spaces sammeln (robuste Pfade)
-    let geoBySpace: Map<number, GeoStats> | undefined;
-    if (useGeometry || forceGeometry) {
-      geoBySpace = collectSpaceGeometry(api as any, modelID, spaceIdSet, {
-        triangleLimit,
-        firstMeshPerSpace,
-      });
-    }
+    // RelAggregates: für Storey/Project
+    const childToParent = buildAggregatesIndex(api as any, modelID);
+    const storeyNames   = getNameMapForTypes(api as any, modelID, IFCBUILDINGSTOREY);
+    const projectNames  = getNameMapForTypes(api as any, modelID, IFCPROJECT);
 
-    // Project (erstes)
-    let Project: string | undefined;
-    for (const [, v] of projectNames) { Project = v.Name; break; }
+    // Pset/Zuweisungen
+    const relDefsByRelated = allParams ? buildRelDefinesIndex(api as any, modelID) : new Map();
 
-    // Alle Spaces iterieren
+    /* --------------------------------- Space IDs ----------------------------------- */
+
+    const spaceIds = api.GetLineIDsWithType(modelID, IFCSPACE);
+
     const rows: Array<Record<string, any>> = [];
-    for (const id of spaceIdSet) {
-      const sp: any = api.GetLine(modelID, id);
+
+    for (let it = spaceIds[Symbol.iterator](), r = it.next(); !r.done; r = it.next()) {
+      const id = r.value as number;
+      const space = api.GetLine(modelID, id);
 
       const row: Record<string, any> = {
-        GlobalId: unwrapNominal(sp?.GlobalId),
-        Name:     unwrapNominal(sp?.Name),
-        LongName: unwrapNominal(sp?.LongName),
+        GlobalId: toPrimitive(space?.GlobalId),
+        Name: toPrimitive(space?.Name),
+        LongName: toPrimitive(space?.LongName),
+        Number: toPrimitive(space?.Tag ?? space?.Number),
       };
 
-      if (Project) row.Project = Project;
+      // Storey / Project
+      const { storey, project } = resolveStoreyAndProject(
+        childToParent,
+        storeyNames,
+        projectNames,
+        id,
+      );
+      if (storey) row['Storey'] = storey;
+      if (project) row['Project'] = project;
 
-      const storeyId = relContainedIdx.get(id);
-      if (storeyId != null) {
-        const s = storeyNames.get(storeyId);
-        if (s?.Name) row.Storey = s.Name;
-        if (s?.Elevation != null) row['Storey Elevation'] = s.Elevation;
-      }
-
-      if (extraParams?.length) {
-        for (const p of extraParams) {
-          try { setIfDefined(row, p, unwrapNominal(sp?.[p])); } catch {}
-        }
-      }
-
+      /* ----------------------------- All Parameters ----------------------------- */
       if (allParams) {
-        Object.assign(row, collectAllParamsForSpace(api as any, modelID, id, relDefinesIndex));
-      } else {
-        const extras = collectAllParamsForSpace(api as any, modelID, id, relDefinesIndex);
-        if (extras.Area   != null) row.Area   = extras.Area;
-        if (extras.Volume != null) row.Volume = extras.Volume;
-      }
-
-      if (geoBySpace) {
-        const g = geoBySpace.get(id);
-        if (g) {
-          if (g.minZ !== undefined) row['Base Elevation'] = roundIf(g.minZ, round);
-          if (g.maxZ !== undefined) row['Top Elevation']  = roundIf(g.maxZ, round);
-
-          const a = roundIf(g.area, round);
-          const v = roundIf(g.volume, round);
-
-          if (forceGeometry || row.Area == null)   row.Area   = a;
-          if (forceGeometry || row.Volume == null) row.Volume = v;
+        const defs = relDefsByRelated.get(id) ?? [];
+        for (const def of defs) {
+          if (!def?.type) continue;
+          if (def.type === IFCPROPERTYSET) {
+            Object.assign(row, extractPsetProps(api as any, modelID, def));
+          } else if (def.type === IFCELEMENTQUANTITY) {
+            Object.assign(row, extractQuantities(api as any, modelID, def));
+          } else {
+            // manche Tools schreiben direkt ElementQuantity/PropertySet Ableitungen → defensiv ignorieren wir andere Typen
+          }
         }
       }
+
+      /* ------------------------- Geometrie (Mesh) – schnell ------------------------- */
+      if (useGeometry || forceGeometry) {
+        const res = getSpaceAreaVolume(api as any, modelID, id);
+        if (res && (res as any).area != null) {
+          const a = roundIf((res as any).area, round);
+          const v = roundIf((res as any).volume, round);
+          setIfEmpty(row, 'Area', a, forceGeometry);
+          setIfEmpty(row, 'Volume', v, forceGeometry);
+        }
+      }
+
+      /* -------------- ExtrudedAreaSolid-Fallback (ohne Triangulation) -------------- */
+      if ((row.Area == null && row.Volume == null) || forceGeometry) {
+        const rep = getSpaceAreaVolumeFromRepresentation(api as any, modelID, id);
+        if (rep) {
+          setIfEmpty(row, 'Area',   roundIf(rep.area, round),   forceGeometry);
+          setIfEmpty(row, 'Volume', roundIf(rep.volume, round), forceGeometry);
+          if (rep.base != null) setIfEmpty(row, 'Base Elevation', roundIf(rep.base, round), false);
+          if (rep.top  != null) setIfEmpty(row, 'Top Elevation',  roundIf(rep.top,  round), false);
+        }
+      }
+
+      /* --------------------------- Extra Param-Pfade --------------------------- */
+      for (const p of extraParams) {
+        try {
+          // sehr einfacher Pfad-Resolver: "Space.X" -> space.X
+          if (p.startsWith('Space.')) {
+            const k = p.slice('Space.'.length);
+            const v = toPrimitive((space as any)?.[k]);
+            if (v != null) row[k] = v;
+          }
+        } catch { /* noop */ }
+      }
+
+      // Runden für alle numerischen Felder (falls round gesetzt)
+      if (typeof round === 'number') {
+        for (const [k, v] of Object.entries(row)) {
+          if (v != null && isFinite(Number(v))) {
+            row[k] = roundIf(v, round);
+          }
+        }
+      }
+
+      // Rename Map anwenden
+      applyRename(row, renameMap);
 
       rows.push(row);
     }
 
-    // Rename
-    if (renameMap && Object.keys(renameMap).length) {
-      for (const r of rows) {
-        for (const [oldKey, newKey] of Object.entries(renameMap)) {
-          if (oldKey in r) {
-            r[newKey] = r[oldKey];
-            if (newKey !== oldKey) delete r[oldKey];
-          }
-        }
-      }
-    }
-
     return rows;
   } finally {
-    api.CloseModel(modelID);
-    try { (api as any).Close?.(); } catch {}
-    try { (api as any).Dispose?.(); } catch {}
+    // Aufräumen – aktuelle web-ifc Versionen besitzen meist nur CloseModel
+    try { api.CloseModel(modelID); } catch {}
+    // (kein api.Dispose(); bewusst weggelassen für Kompatibilität)
   }
 }
