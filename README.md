@@ -182,6 +182,8 @@ Created by BIM X Consulting.
 
 For support, workshops, or enterprise requests (automation, AI, BIM data): bim-x-consulting.de
 
+
+
 # n8n-nodes-bimx-ifc-qto (DE)
 
 Binary IFC → XLSX/TSV mit Fläche/Volumen für IfcSpace, auf Basis von web-ifc (WASM).
