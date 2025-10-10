@@ -16,6 +16,9 @@ import {
 
 import { toBuffer } from '../utils/toBuffer';
 
+type OutputMode = 'items' | 'flat' | 'grouped';
+type ValueStyle = 'full' | 'leaf';
+
 export class IfcParameterExplorer implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'BIM X – IFC Parameter Explorer',
@@ -23,7 +26,8 @@ export class IfcParameterExplorer implements INodeType {
     icon: 'file:BIMX.svg',
     group: ['transform'],
     version: 1,
-    description: 'Listet alle Parameter-Schlüssel aus IfcSpace (Space.*, Pset_*, Qto_*)',
+    description:
+      'Listet Parameter aus IfcSpace (Space.*, Pset_*, Qto_*); wahlweise als Liste oder als ein zusammengefasstes Objekt für Drag&Drop.',
     defaults: { name: 'BIM X – IFC Parameter Explorer' },
     inputs: ['main'],
     outputs: ['main'],
@@ -44,11 +48,29 @@ export class IfcParameterExplorer implements INodeType {
         default: 1,
       },
       {
-        displayName: 'Leaf-only (unique)',
-        name: 'leafOnly',
-        type: 'boolean',
-        default: false,
-        description: 'Gibt eine eindeutige Liste nur der Parameternamen (Leaf) aus',
+        displayName: 'Output',
+        name: 'outputMode',
+        type: 'options',
+        default: 'grouped',
+        options: [
+          { name: 'Items (one per key)', value: 'items' },
+          { name: 'Single Object (flat)', value: 'flat' },
+          { name: 'Single Object (grouped by set)', value: 'grouped' },
+        ],
+        description:
+          '„Single Object“ erzeugt genau ein Item, das beim Aufklappen direkt alle Parameter als Felder zeigt.',
+      },
+      {
+        displayName: 'Value Style',
+        name: 'valueStyle',
+        type: 'options',
+        default: 'full',
+        options: [
+          { name: 'Full key (recommended)', value: 'full' },
+          { name: 'Leaf only', value: 'leaf' },
+        ],
+        description:
+          'Welcher String als Feldwert geschrieben wird. „Full key“ ist ideal zum Drag&Drop in den QTO-Node.',
       },
     ],
   };
@@ -60,7 +82,8 @@ export class IfcParameterExplorer implements INodeType {
     for (let i = 0; i < items.length; i++) {
       const binName = this.getNodeParameter('binaryPropertyName', i) as string;
       const maxExamples = this.getNodeParameter('maxExamples', i) as number;
-      const leafOnly = this.getNodeParameter('leafOnly', i) as boolean;
+      const outputMode = this.getNodeParameter('outputMode', i) as OutputMode;
+      const valueStyle = this.getNodeParameter('valueStyle', i) as ValueStyle;
 
       const binary = items[i].binary?.[binName];
       if (!binary?.data) {
@@ -93,20 +116,20 @@ export class IfcParameterExplorer implements INodeType {
         }
 
         // --- Keys sammeln ---
-        type Entry = { group: string; prop: string; type: 'space' | 'pset' | 'qto'; samples: any[] };
-        const keys = new Map<string, Entry>(); // fullName -> entry
+        type Entry = {
+          fullName: string; // z. B. "Pset_SpaceCommon.WallCovering"
+          setName: string;  // z. B. "Pset_SpaceCommon" | "Space" | "Qto_*"
+          prop: string;     // Leaf, z. B. "WallCovering"
+          sample: any | null;
+          kind: 'space' | 'pset' | 'qto';
+        };
+        const entries: Entry[] = [];
 
         const toPrim = (v: any) => {
           let x = v;
           while (x && typeof x === 'object' && 'value' in x && Object.keys(x).length === 1) x = x.value;
           if (x && typeof x === 'object' && 'value' in x && typeof x.value !== 'object') x = x.value;
           return x;
-        };
-
-        const add = (fullName: string, group: string, prop: string, type: Entry['type'], val: any) => {
-          if (!keys.has(fullName)) keys.set(fullName, { group, prop, type, samples: [] });
-          const e = keys.get(fullName)!;
-          if (e.samples.length < maxExamples && val !== undefined) e.samples.push(val);
         };
 
         const spaceVec = api.GetLineIDsWithType(modelID, IFCSPACE);
@@ -120,7 +143,14 @@ export class IfcParameterExplorer implements INodeType {
           const spaceAttrs = ['Name','LongName','ObjectType','Description','Tag','Number','ElevationWithFlooring'];
           for (const attr of spaceAttrs) {
             const val = toPrim(sp?.[attr as keyof typeof sp]);
-            if (val != null) add(`Space.${attr}`, 'Space', attr, 'space', val);
+            if (val == null) continue;
+            entries.push({
+              fullName: `Space.${attr}`,
+              setName: 'Space',
+              prop: attr,
+              sample: val,
+              kind: 'space',
+            });
           }
 
           // Pset + Qto
@@ -133,7 +163,14 @@ export class IfcParameterExplorer implements INodeType {
                 const pl = api.GetLine(modelID, pid);
                 const nm = toPrim(pl?.Name);
                 const val = toPrim(pl?.NominalValue ?? pl?.NominalValue?.value ?? pl?.value);
-                if (nm) add(`${setName}.${nm}`, setName, nm, 'pset', val);
+                if (!nm) continue;
+                entries.push({
+                  fullName: `${setName}.${nm}`,
+                  setName,
+                  prop: nm,
+                  sample: val ?? null,
+                  kind: 'pset',
+                });
               }
             } else if (def?.type === IFCELEMENTQUANTITY) {
               const qName = toPrim(def?.Name) ?? 'Qto';
@@ -145,45 +182,52 @@ export class IfcParameterExplorer implements INodeType {
                 const vol  = toPrim(ql?.VolumeValue);
                 const len  = toPrim(ql?.LengthValue ?? ql?.PerimeterValue);
                 const val = area ?? vol ?? len ?? null;
-                if (nm) add(`${qName}.${nm}`, qName, nm, 'qto', val);
+                if (!nm) continue;
+                entries.push({
+                  fullName: `${qName}.${nm}`,
+                  setName: qName,
+                  prop: nm,
+                  sample: val,
+                  kind: 'qto',
+                });
               }
             }
           }
         }
 
-        if (leafOnly) {
-          // ---- Leaf-only: eindeutige Liste der prop-Namen ----
-          const leafMap = new Map<string, { sources: Set<string>, sample: any }>();
-          for (const [fullName, e] of keys) {
-            const key = e.prop; // Leaf
-            if (!leafMap.has(key)) leafMap.set(key, { sources: new Set<string>(), sample: null });
-            const info = leafMap.get(key)!;
-            info.sources.add(fullName);
-            if (info.sample == null && e.samples?.length) info.sample = e.samples[0];
-          }
-          for (const [prop, info] of leafMap) {
+        // --- Ausgabe gemäß Modus ---
+        if (outputMode === 'items') {
+          // Einzel-Items (bestehend): name/prop/label/group/type/sample
+          for (const e of entries) {
             out.push({
               json: {
-                prop,                                // <- genau das willst du ziehen
-                sources: Array.from(info.sources).sort(),
-                sample: info.sample ?? null,
-              },
-            });
-          }
-        } else {
-          // ---- Detail-Ausgabe pro vollem Key ----
-          for (const [fullName, e] of keys) {
-            out.push({
-              json: {
-                name: fullName,  // z. B. "Pset_SpaceCommon.WallCovering"
-                prop: e.prop,    // z. B. "WallCovering"
+                name: e.fullName,
+                prop: e.prop,
                 label: e.prop,
-                group: e.group,
-                type: e.type,
-                sample: e.samples?.[0] ?? null,
+                group: e.setName,
+                type: e.kind,
+                sample: e.sample,
               },
             });
           }
+        } else if (outputMode === 'flat') {
+          // Ein Item, flach: Key = Leaf, Value = leaf|full (erste Vorkommen gewinnt)
+          const flat: Record<string, any> = {};
+          for (const e of entries) {
+            if (flat[e.prop] !== undefined) continue; // erste Definition behalten
+            flat[e.prop] = (valueStyle === 'full') ? e.fullName : e.prop;
+          }
+          out.push({ json: flat });
+        } else {
+          // grouped: Ein Item, gruppiert: { Space: {Name:"..."}, Pset_*: {...}, Qto_*: {...} }
+          const grouped: Record<string, Record<string, any>> = {};
+          for (const e of entries) {
+            if (!grouped[e.setName]) grouped[e.setName] = {};
+            const target = grouped[e.setName];
+            if (target[e.prop] !== undefined) continue; // erste Definition behalten
+            target[e.prop] = (valueStyle === 'full') ? e.fullName : e.prop;
+          }
+          out.push({ json: grouped as any });
         }
       } finally {
         try { api.CloseModel(modelID); } catch {}
