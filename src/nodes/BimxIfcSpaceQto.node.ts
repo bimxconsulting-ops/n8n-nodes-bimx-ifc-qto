@@ -11,7 +11,7 @@ export class BimxIfcSpaceQto implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'BIM X – IFC Space QTO',
     name: 'bimxIfcSpaceQto',
-    icon: 'file:BIMX.svg',
+    icon: 'file:BIMX.svg', // wichtig: als String belassen
     group: ['transform'],
     version: 1,
     description: 'Binary IFC in → XLSX/TSV out (Area/Volume of IfcSpaces via web-ifc)',
@@ -57,7 +57,14 @@ export class BimxIfcSpaceQto implements INodeType {
                 name: 'param',
                 displayName: 'Parameter',
                 values: [
-                  { displayName: 'Parameter Name', name: 'paramName', type: 'string', default: '' },
+                  {
+                    displayName: 'Parameter Name',
+                    name: 'paramName',
+                    type: 'string',
+                    default: '',
+                    description:
+                      'Z. B. Space.Name oder Pset_SpaceCommon.WallCovering oder Qto_SpaceBaseQuantities.NetFloorArea',
+                  },
                 ],
               },
             ],
@@ -122,7 +129,7 @@ export class BimxIfcSpaceQto implements INodeType {
         round,
       } as QtoOptions);
 
-      // Rundung auf alle numerischen Felder anwenden
+      // Rundung auf alle numerischen Felder nochmals anwenden (UI-Konsistenz)
       const roundVal = (v: any) => (typeof v === 'number' ? Number(v.toFixed(round)) : v);
       const rowsRounded = rows.map((rw) => {
         const o: Record<string, any> = {};
