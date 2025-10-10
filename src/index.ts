@@ -1,2 +1,3 @@
 // src/index.ts
-export {};
+export * from './nodes/BimxIfcSpaceQto.node';
+export * from './nodes/IfcParameterExplorer.node';
