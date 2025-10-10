@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
   "author": "BIM X",
   "license": "MIT",
@@ -8,10 +8,10 @@
     "type": "git",
     "url": "git+https://github.com/<DEIN-ORG>/<DEIN-REPO>.git"
   },
-  "keywords": ["n8n","n8n-community-node","ifc","web-ifc","bim","qto"],
+  "keywords": ["n8n", "n8n-community-node", "ifc", "web-ifc", "bim", "qto"],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist/**/*","README.md","LICENSE"],
+  "files": ["dist/**/*", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.json && node ./scripts/copy-assets.cjs",
     "clean": "rimraf dist",
