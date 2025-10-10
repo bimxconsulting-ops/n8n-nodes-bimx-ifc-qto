@@ -43,6 +43,13 @@ export class IfcParameterExplorer implements INodeType {
         typeOptions: { minValue: 0 },
         default: 1,
       },
+      {
+        displayName: 'Leaf-only (unique)',
+        name: 'leafOnly',
+        type: 'boolean',
+        default: false,
+        description: 'Gibt eine eindeutige Liste nur der Parameternamen (Leaf) aus',
+      },
     ],
   };
 
@@ -53,6 +60,7 @@ export class IfcParameterExplorer implements INodeType {
     for (let i = 0; i < items.length; i++) {
       const binName = this.getNodeParameter('binaryPropertyName', i) as string;
       const maxExamples = this.getNodeParameter('maxExamples', i) as number;
+      const leafOnly = this.getNodeParameter('leafOnly', i) as boolean;
 
       const binary = items[i].binary?.[binName];
       if (!binary?.data) {
@@ -143,19 +151,39 @@ export class IfcParameterExplorer implements INodeType {
           }
         }
 
-        // Ausgabe: 1 Item pro Key
-        for (const [fullName, e] of keys) {
-          out.push({
-            json: {
-              // für QTO-Node:
-              name: fullName,        // z.B. "Pset_SpaceCommon.WallCovering"
-              prop: e.prop,          // z.B. "WallCovering"  <= nur das Leaf
-              label: e.prop,         // Alias für prop
-              group: e.group,        // "Space" | "Pset_SpaceCommon" | "Qto_SpaceBaseQuantities" ...
-              type: e.type,          // 'space' | 'pset' | 'qto'
-              sample: e.samples?.[0] ?? null,
-            },
-          });
+        if (leafOnly) {
+          // ---- Leaf-only: eindeutige Liste der prop-Namen ----
+          const leafMap = new Map<string, { sources: Set<string>, sample: any }>();
+          for (const [fullName, e] of keys) {
+            const key = e.prop; // Leaf
+            if (!leafMap.has(key)) leafMap.set(key, { sources: new Set<string>(), sample: null });
+            const info = leafMap.get(key)!;
+            info.sources.add(fullName);
+            if (info.sample == null && e.samples?.length) info.sample = e.samples[0];
+          }
+          for (const [prop, info] of leafMap) {
+            out.push({
+              json: {
+                prop,                                // <- genau das willst du ziehen
+                sources: Array.from(info.sources).sort(),
+                sample: info.sample ?? null,
+              },
+            });
+          }
+        } else {
+          // ---- Detail-Ausgabe pro vollem Key ----
+          for (const [fullName, e] of keys) {
+            out.push({
+              json: {
+                name: fullName,  // z. B. "Pset_SpaceCommon.WallCovering"
+                prop: e.prop,    // z. B. "WallCovering"
+                label: e.prop,
+                group: e.group,
+                type: e.type,
+                sample: e.samples?.[0] ?? null,
+              },
+            });
+          }
         }
       } finally {
         try { api.CloseModel(modelID); } catch {}
