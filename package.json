@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<DEIN-ORG>/<DEIN-REPO>.git"
+    "url": "git+https://github.com/bimxconsulting-ops/n8n-nodes-bimx-ifc-qto.git"
   },
   "keywords": ["n8n", "n8n-community-node", "ifc", "web-ifc", "bim", "qto"],
   "main": "dist/index.js",
