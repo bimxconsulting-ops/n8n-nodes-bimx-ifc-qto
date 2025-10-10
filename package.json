@@ -8,29 +8,17 @@
     "type": "git",
     "url": "git+https://github.com/<DEIN-ORG>/<DEIN-REPO>.git"
   },
-  "keywords": [
-    "n8n",
-    "n8n-community-node",
-    "ifc",
-    "web-ifc",
-    "bim",
-    "qto"
-  ],
+  "keywords": ["n8n","n8n-community-node","ifc","web-ifc","bim","qto"],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": [
-    "dist/**/*",
-    "README.md"
-  ],
+  "files": ["dist/**/*","README.md","LICENSE"],
   "scripts": {
-  "build": "tsc -p tsconfig.json && node ./scripts/copy-assets.cjs",
-  "clean": "rimraf dist",
-  "prepare": "npm run build",
-  "lint": "echo \"(optional) add eslint here\""
-},
-  "engines": {
-    "node": ">=18"
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-assets.cjs",
+    "clean": "rimraf dist",
+    "prepare": "npm run build",
+    "lint": "echo \"(optional) add eslint here\""
   },
+  "engines": { "node": ">=18" },
   "n8n": {
     "nodes": [
       { "type": "dist/nodes/BimxIfcSpaceQto.node.js" },
@@ -38,9 +26,11 @@
     ]
   },
   "dependencies": {
-    "n8n-workflow": "^1.0.0",
     "web-ifc": "^0.0.51",
     "xlsx": "^0.18.5"
+  },
+  "peerDependencies": {
+    "n8n-workflow": ">=1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
