@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
   "author": "BIM X",
   "license": "MIT",
@@ -23,11 +23,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "clean": "rimraf dist",
-    "prepare": "npm run build",
-    "lint": "echo \"(optional) add eslint here\""
-  },
+  "build": "tsc -p tsconfig.json && node ./scripts/copy-assets.cjs",
+  "clean": "rimraf dist",
+  "prepare": "npm run build",
+  "lint": "echo \"(optional) add eslint here\""
+},
   "engines": {
     "node": ">=18"
   },
