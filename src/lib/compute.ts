@@ -21,7 +21,7 @@ export interface QtoOptions {
   allParams?: boolean;
   useGeometry?: boolean;     // bedeuted hier: Repräsentation (Extrusion/BRep) nutzen
   forceGeometry?: boolean;   // Geometriewerte dürfen Pset/Qto-Werte überschreiben
-  extraParams?: string[];
+  extraParams?: string | string[];   // <- flexibler: String ODER Array
   renameMap?: Record<string, string>;
   round?: number;
 }
@@ -65,6 +65,59 @@ function applyRename(row: Record<string, any>, rename?: Record<string, string>) 
       if (nu !== oldKey) delete row[oldKey];
     }
   }
+}
+
+/** ---------------- Extra-Parameter: Normalisieren & Auflösen ---------------- **/
+
+// "a,b;c \n d"  ->  ["a","b","c","d"]
+function splitExtraParams(raw: string | string[] | undefined): string[] {
+  if (!raw) return [];
+  const s = Array.isArray(raw) ? raw.join(',') : raw;
+  return s.split(/[\n,;]+/g).map(t => t.trim()).filter(Boolean);
+}
+
+// Mappt Eingaben wie "WallCovering" auf kanonische Keys wie "Pset_SpaceCommon.WallCovering"
+function resolveExtraKeys(tokens: string[], availableKeys: string[]): string[] {
+  if (!tokens.length || !availableKeys.length) return [];
+  const unique: string[] = [];
+  const push = (k: string) => { if (k && !unique.includes(k)) unique.push(k); };
+
+  const lcAvail = availableKeys.map(k => k.toLowerCase());
+
+  for (const raw of tokens) {
+    const t = raw.trim();
+    if (!t) continue;
+
+    // Space.* lassen wir hier durch – wird separat gelesen
+    if (t.toLowerCase().startsWith('space.')) continue;
+
+    if (t.includes('.')) {
+      // Voller Key angegeben
+      const idx = lcAvail.indexOf(t.toLowerCase());
+      if (idx >= 0) push(availableKeys[idx]);
+      continue;
+    }
+
+    // Nur der Property-Name -> als Suffix matchen
+    const suffix = '.' + t.toLowerCase();
+    const cands: string[] = [];
+    lcAvail.forEach((k, i) => {
+      if (k.endsWith(suffix)) cands.push(availableKeys[i]);
+    });
+
+    if (cands.length === 1) {
+      push(cands[0]);
+    } else if (cands.length > 1) {
+      // Heuristik: Pset_SpaceCommon oder Qto_* bevorzugen
+      const pref =
+        cands.find(k => /(^|\/)Pset_SpaceCommon\./i.test(k)) ||
+        cands.find(k => /(^|\/)Qto_/i.test(k)) ||
+        cands[0];
+      push(pref);
+    }
+    // keine Treffer -> ignorieren
+  }
+  return unique;
 }
 
 /* --------------------------- Projekt/Storey Lookup -------------------------- */
@@ -492,7 +545,8 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
     const childToParent = buildAggregatesIndex(api as any, modelID);
     const storeyNames   = getNameMapForTypes(api as any, modelID, IFCBUILDINGSTOREY);
     const projectNames  = getNameMapForTypes(api as any, modelID, IFCPROJECT);
-    const relDefsByRelated = allParams ? buildRelDefinesIndex(api as any, modelID) : new Map();
+    // Index jetzt immer bauen – wird auch für gezielte Extra-Parameter gebraucht
+    const relDefsByRelated = buildRelDefinesIndex(api as any, modelID);
 
     const rows: Array<Record<string, any>> = [];
     const spaceVec = api.GetLineIDsWithType(modelID, IFCSPACE);
@@ -514,16 +568,19 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
       if (storey) row['Storey'] = storey;
       if (project) row['Project'] = project;
 
-      // Psets / Quantities
-      if (allParams) {
-        const defs = relDefsByRelated.get(id) ?? [];
-        for (const def of defs) {
-          if (!def?.type) continue;
-          if (def.type === IFCPROPERTYSET) {
-            Object.assign(row, extractPsetProps(api as any, modelID, def));
-          } else if (def.type === IFCELEMENTQUANTITY) {
-            Object.assign(row, extractQuantities(api as any, modelID, def));
-          }
+      // ---- Psets / Quantities sammeln (immer in flatProps), optional in row mergen
+      const flatProps: Record<string, any> = {};
+      const defs = relDefsByRelated.get(id) ?? [];
+      for (const def of defs) {
+        if (!def?.type) continue;
+        if (def.type === IFCPROPERTYSET) {
+          const o = extractPsetProps(api as any, modelID, def);
+          Object.assign(flatProps, o);
+          if (allParams) Object.assign(row, o);
+        } else if (def.type === IFCELEMENTQUANTITY) {
+          const o = extractQuantities(api as any, modelID, def);
+          Object.assign(flatProps, o);
+          if (allParams) Object.assign(row, o);
         }
       }
 
@@ -540,16 +597,27 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
         } catch {/* best effort */}
       }
 
-      // Extra-Felder direkt vom Space
-      for (const p of extraParams) {
-        try {
-          if (p.startsWith('Space.')) {
-            const k = p.slice('Space.'.length);
+      // ------------------------ Extra Parameters anwenden ------------------------
+      const tokens = splitExtraParams(extraParams as any);
+
+      // 1) Space.* Direktzugriffe
+      for (const t of tokens) {
+        if (t.toLowerCase().startsWith('space.')) {
+          const k = t.slice('Space.'.length); // Case beibehalten für Ausgabe
+          try {
             const v = toPrimitive((space as any)?.[k]);
             if (v != null) row[k] = v;
-          }
-        } catch {}
+          } catch {/* noop */}
+        }
       }
+
+      // 2) Pset-/Qto-Keys auflösen (mit oder ohne Pset-Angabe)
+      const resolved = resolveExtraKeys(tokens, Object.keys(flatProps));
+      for (const key of resolved) {
+        // erzwinge Aufnahme – auch wenn allParams=false (oder Key bereits existiert)
+        setIfEmpty(row, key, flatProps[key], true);
+      }
+      // --------------------------------------------------------------------------
 
       if (typeof round === 'number') {
         for (const [k, v] of Object.entries(row)) {
