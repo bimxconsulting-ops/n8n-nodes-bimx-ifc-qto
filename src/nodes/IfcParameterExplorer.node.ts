@@ -1,6 +1,22 @@
-import type { IExecuteFunctions, INodeExecutionData, INodeType, INodeTypeDescription } from 'n8n-workflow';
-import { IfcAPI, IFCSPACE, IFCPROPERTYSET, IFCELEMENTQUANTITY, IFCRELDEFINESBYPROPERTIES } from 'web-ifc';
-import { toBuffer } from './utils/toBuffer'; // schreibe kleine Helferfunktion wie in deinem QTO-Node
+// src/nodes/IfcParameterExplorer.node.ts
+import type {
+  IExecuteFunctions,
+  INodeExecutionData,
+  INodeType,
+  INodeTypeDescription,
+} from 'n8n-workflow';
+
+import {
+  IfcAPI,
+  IFCSPACE,
+  IFCPROPERTYSET,
+  IFCELEMENTQUANTITY,
+  IFCRELDEFINESBYPROPERTIES,
+} from 'web-ifc';
+
+// <- von nodes/ eine Ebene hoch zu utils/
+import { toBuffer } from '../utils/toBuffer';
+
 
 export class IfcParameterExplorer implements INodeType {
   description: INodeTypeDescription = {
