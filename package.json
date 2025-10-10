@@ -1,37 +1,53 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.41",
-  "description": "BIM X – IFC Space QTO (Binary IFC in → XLSX/TSV out) powered by web-ifc",
+  "version": "0.1.42",
+  "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
+  "author": "BIM X",
   "license": "MIT",
-  "author": "BIM X Consulting",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/<DEIN-ORG>/<DEIN-REPO>.git"
+  },
+  "keywords": [
+    "n8n",
+    "n8n-community-node",
+    "ifc",
+    "web-ifc",
+    "bim",
+    "qto"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "keywords": ["n8n-community-node-package","bim","ifc","web-ifc","qto"],
-  "n8n": { "nodes": ["dist/nodes/BimxIfcSpaceQto.node.js"], "credentials": [] },
-
-  "scripts": {
-    "build": "tsc && node ./scripts/copy-assets.cjs",
-    "pack": "npm run build && npm pack",
-    "publish:public": "npm run build && npm publish --access public"
-  },
-
   "files": [
-    "dist",
-    "LICENSE",
+    "dist/**/*",
     "README.md"
   ],
-
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist",
+    "prepare": "npm run build",
+    "lint": "echo \"(optional) add eslint here\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "n8n": {
+    "nodes": [
+      {
+        "type": "dist/nodes/BimxIfcSpaceQto.node.js"
+      },
+      {
+        "type": "dist/nodes/IfcParameterExplorer.node.js"
+      }
+    ]
+  },
   "dependencies": {
     "web-ifc": "^0.0.51",
     "xlsx": "^0.18.5"
   },
-  "peerDependencies": {
-    "n8n-workflow": "*"
-  },
   "devDependencies": {
-    "@types/node": "^20.12.12",
-    "typescript": "^5.6.3",
-    "n8n-workflow": "*"
-  },
-  "engines": { "node": ">=18" }
+    "@types/node": "^20.11.30",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.4.5"
+  }
 }
