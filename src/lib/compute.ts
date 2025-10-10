@@ -2,18 +2,14 @@
 
 import {
   IfcAPI,
-  // Entitäten
   IFCSPACE,
   IFCPROJECT,
   IFCBUILDINGSTOREY,
-  // Relationen
   IFCRELDEFINESBYPROPERTIES,
   IFCRELCONTAINEDINSPATIALSTRUCTURE,
-  // Property-Container
   IFCPROPERTYSET,
   IFCPROPERTYSINGLEVALUE,
   IFCELEMENTQUANTITY,
-  // Quantities
   IFCQUANTITYAREA,
   IFCQUANTITYVOLUME,
 } from 'web-ifc';
@@ -29,27 +25,12 @@ export interface QtoOptions {
   extraParams?: string[];
   renameMap?: Record<string, string>;
   round?: number;
+  // Performance-Schalter:
+  triangleLimit?: number;         // globales Triangellimit, default 3 Mio
+  firstMeshPerSpace?: boolean;    // nur erstes Mesh je Space verwenden
 }
 
 /* ------------------------------ Utility-Helper ------------------------------ */
-
-function applyMatrix4ToVerts(vs: Float32Array, m: number[] | Float32Array) {
-  if (!m || (m as any).length !== 16) return vs;
-  const out = new Float32Array(vs.length);
-
-  const m00 = +m[0],  m01 = +m[1],  m02 = +m[2],  m03 = +m[3];
-  const m10 = +m[4],  m11 = +m[5],  m12 = +m[6],  m13 = +m[7];
-  const m20 = +m[8],  m21 = +m[9],  m22 = +m[10], m23 = +m[11];
-  const m30 = +m[12], m31 = +m[13], m32 = +m[14], m33 = +m[15];
-
-  for (let i = 0; i < vs.length; i += 3) {
-    const x = vs[i], y = vs[i + 1], z = vs[i + 2];
-    out[i]     = m00 * x + m10 * y + m20 * z + m30;
-    out[i + 1] = m01 * x + m11 * y + m21 * z + m31;
-    out[i + 2] = m02 * x + m12 * y + m22 * z + m32;
-  }
-  return out;
-}
 
 function unwrapNominal(v: any): any {
   if (v == null) return v;
@@ -61,12 +42,37 @@ function setIfDefined(obj: Record<string, any>, key: string, val: any) {
   if (val !== undefined && val !== null) obj[key] = val;
 }
 
+function applyMatrix4ToVerts(vs: Float32Array, m: number[] | Float32Array) {
+  if (!m || (m as any).length !== 16) return vs;
+  const out = new Float32Array(vs.length);
+
+  const m00 = +m[0],  m01 = +m[1],  m02 = +m[2];
+  const m10 = +m[4],  m11 = +m[5],  m12 = +m[6];
+  const m20 = +m[8],  m21 = +m[9],  m22 = +m[10];
+  const m30 = +m[12], m31 = +m[13], m32 = +m[14];
+
+  for (let i = 0; i < vs.length; i += 3) {
+    const x = vs[i], y = vs[i + 1], z = vs[i + 2];
+    out[i]     = m00 * x + m10 * y + m20 * z + m30;
+    out[i + 1] = m01 * x + m11 * y + m21 * z + m31;
+    out[i + 2] = m02 * x + m12 * y + m22 * z + m32;
+  }
+  return out;
+}
+
 function toUint32Any(iArr: any): Uint32Array {
   if (iArr instanceof Uint32Array) return iArr;
-  // Explizit konvertieren (funktioniert auch für Uint16Array)
-  const out = new Uint32Array(iArr.length ?? (iArr?.byteLength ? iArr.byteLength / 2 : 0));
-  for (let i = 0; i < out.length; i++) out[i] = iArr[i] as number;
+  // inkl. Uint16Array/Int32Array etc.
+  const len = iArr?.length ?? (iArr?.byteLength ? (iArr.byteLength / 4) : 0);
+  const out = new Uint32Array(len);
+  for (let i = 0; i < len; i++) out[i] = Number(iArr[i] ?? 0);
   return out;
+}
+
+function roundIf(val: number | undefined, digits?: number) {
+  if (val == null || digits == null) return val;
+  const p = Math.pow(10, digits);
+  return Math.round(val * p) / p;
 }
 
 /* ----------------------- Relationen/Metadaten indizieren ------------------- */
@@ -100,12 +106,12 @@ function buildRelContainedIndex(api: any, modelID: number) {
   for (let r = it.next(); !r.done; r = it.next()) {
     const rid = r.value as number;
     const rel = api.GetLine(modelID, rid);
-    const storeyId = rel?.RelatingStructure?.value;
+    const structId = rel?.RelatingStructure?.value;
     const elems = rel?.RelatedElements;
-    if (!storeyId || !Array.isArray(elems)) continue;
+    if (!structId || !Array.isArray(elems)) continue;
     for (const e of elems) {
       const eid = e?.value;
-      if (eid || eid === 0) map.set(eid, storeyId);
+      if (eid || eid === 0) map.set(eid, structId);
     }
   }
   return map;
@@ -133,42 +139,46 @@ function buildSpaceIdSet(api: any, modelID: number) {
   return set;
 }
 
-/* --------------- Geometrie einmal streamen + nach Space mappen ------------- */
+/* --------------- Geometrie nur für IfcSpaces einsammeln (robust) ----------- */
 
 type GeoStats = { area: number; volume: number; tris: number; minZ?: number; maxZ?: number };
 
-function collectSpaceGeometryFast(
+function consumeFlatMeshForSpace(
   api: any,
   modelID: number,
-  spaceIdSet: Set<number>,
-  opts: { triangleLimit?: number; firstMeshPerSpace?: boolean } = {}
+  fm: any,
+  stats: GeoStats,
 ) {
-  const { triangleLimit = 3_000_000, firstMeshPerSpace = false } = opts;
+  if (!fm) return;
 
-  const perSpace = new Map<number, GeoStats>();
-  let totalTris = 0;
+  // Geometrie-Handle(n)
+  const geomHandles: Array<{ geometryExpressID: number; matrix?: any }> = [];
+  const add = (x: any) => {
+    const gId = x?.geometryExpressID ?? x?.GeometryExpressID ?? x?.geomExpressID;
+    if (typeof gId === 'number') geomHandles.push({ geometryExpressID: gId, matrix: x?.matrix ?? x?.transformMatrix ?? x?.coordinationMatrix ?? x?.transform });
+  };
 
-  const consumeMesh = (fm: any) => {
-    const sid = fm?.expressID ?? fm?.ExpressID;
-    if (sid == null) return;
-    if (!spaceIdSet.has(sid)) return;              // ✅ nur IfcSpace-Meshes
-    if (firstMeshPerSpace && perSpace.has(sid)) return;
+  if (Array.isArray((fm as any).geometries)) {
+    for (const g of (fm as any).geometries) add(g);
+  } else {
+    add(fm);
+  }
+  if (geomHandles.length === 0) return;
 
-    const geom: any = api.GetGeometry(modelID, fm.geometryExpressID);
-    if (!geom) return;
+  for (const h of geomHandles) {
+    const geom: any = api.GetGeometry(modelID, h.geometryExpressID);
+    if (!geom) continue;
 
-    const vRaw: Float32Array = api.GetArray(geom.GetVertexData(), geom.GetVertexDataSize());
-    const iRaw: any          = api.GetArray(geom.GetIndexData(),  geom.GetIndexDataSize());
-    const idx: Uint32Array   = toUint32Any(iRaw);
+    let verts: Float32Array = api.GetArray(geom.GetVertexData(), geom.GetVertexDataSize());
+    const iRaw: any         = api.GetArray(geom.GetIndexData(),  geom.GetIndexDataSize());
+    const idx: Uint32Array  = toUint32Any(iRaw);
 
-    const tris = idx.length / 3;
-    totalTris += tris;
-    if (triangleLimit && totalTris > triangleLimit) return;
-
-    let verts = vRaw;
     const m =
-      (fm && (fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform)) || null;
-    if (m && (m as any).length === 16) verts = applyMatrix4ToVerts(verts, m as any);
+      (h.matrix && (h.matrix.length === 16)) ? h.matrix :
+      ((fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform) && (fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform).length === 16
+        ? (fm.matrix || fm.transformMatrix || fm.coordinationMatrix || fm.transform)
+        : null);
+    if (m) verts = applyMatrix4ToVerts(verts, m);
 
     // 2D-Footprint & Volumen
     const a = footprintAreaXY(verts, idx);
@@ -183,41 +193,96 @@ function collectSpaceGeometryFast(
       if (z > maxZ) maxZ = z;
     }
 
-    const prev = perSpace.get(sid) ?? { area: 0, volume: 0, tris: 0 };
-    prev.area   += a;
-    prev.volume += v;
-    prev.tris   += tris;
-    prev.minZ    = Math.min(prev.minZ ?? +Infinity, minZ);
-    prev.maxZ    = Math.max(prev.maxZ ?? -Infinity, maxZ);
-    perSpace.set(sid, prev);
+    stats.area   += a;
+    stats.volume += v;
+    stats.tris   += idx.length / 3;
+    stats.minZ    = Math.min(stats.minZ ?? +Infinity, minZ);
+    stats.maxZ    = Math.max(stats.maxZ ?? -Infinity, maxZ);
+  }
+}
 
-    if (typeof api.ReleaseGeometry === 'function') {
-      try { api.ReleaseGeometry(modelID, fm.geometryExpressID); } catch {}
-    }
-  };
+function collectSpaceGeometry(
+  api: any,
+  modelID: number,
+  spaceIdSet: Set<number>,
+  opts: { triangleLimit: number; firstMeshPerSpace: boolean }
+) {
+  const { triangleLimit, firstMeshPerSpace } = opts;
+  const perSpace = new Map<number, GeoStats>();
+  let totalTris = 0;
 
-  if (typeof api.StreamAllMeshes === 'function') {
-    try {
-      // Stream All, wir filtern selbst per spaceIdSet (robuster über Versionen)
-      api.StreamAllMeshes(modelID, (fm: any) => consumeMesh(fm));
-    } catch {
-      const fms: any = api.LoadAllGeometry(modelID);
-      const size = typeof fms?.size === 'function' ? fms.size() : 0;
-      for (let i = 0; i < size; i++) consumeMesh(fms.get(i));
+  // 1) Beste Option: pro Space-ID GetFlatMesh (keine allg. Streams → weniger Fehler/Overhead)
+  if (typeof api.GetFlatMesh === 'function') {
+    for (const sid of spaceIdSet) {
+      if (firstMeshPerSpace && perSpace.has(sid)) continue;
+      const stats: GeoStats = { area: 0, volume: 0, tris: 0 };
+      try {
+        const fm = api.GetFlatMesh(modelID, sid);
+        consumeFlatMeshForSpace(api, modelID, fm, stats);
+      } catch {
+        // ignorieren – einzelne Spaces dürfen fehlschlagen
+      }
+      if (stats.tris > 0) {
+        totalTris += stats.tris;
+        perSpace.set(sid, stats);
+        if (triangleLimit && totalTris > triangleLimit) break;
+      }
     }
-  } else {
-    const fms: any = api.LoadAllGeometry(modelID);
-    const size = typeof fms?.size === 'function' ? fms.size() : 0;
-    for (let i = 0; i < size; i++) consumeMesh(fms.get(i));
+    finalizeExtents(perSpace);
+    return perSpace;
   }
 
-  // Aufräumen: unendliche Extents → undefined
+  // 2) Falls vorhanden: typ-gefiltertes Streaming nur für IFCSPACE
+  if (typeof (api as any).StreamAllMeshesOfType === 'function') {
+    try {
+      (api as any).StreamAllMeshesOfType(modelID, IFCSPACE, (fm: any) => {
+        const sid = fm?.expressID ?? fm?.ExpressID;
+        if (sid == null || !spaceIdSet.has(sid)) return;
+        if (firstMeshPerSpace && perSpace.has(sid)) return;
+
+        const stats = perSpace.get(sid) ?? { area: 0, volume: 0, tris: 0 };
+        consumeFlatMeshForSpace(api, modelID, fm, stats);
+
+        if (stats.tris > 0) {
+          perSpace.set(sid, stats);
+          totalTris += stats.tris;
+        }
+      });
+    } catch { /* noop */ }
+
+    finalizeExtents(perSpace);
+    return perSpace;
+  }
+
+  // 3) Letzter Fallback: alles laden und streng nach expressID filtern
+  const fms: any = api.LoadAllGeometry(modelID);
+  const size = typeof fms?.size === 'function' ? fms.size() : 0;
+
+  for (let i = 0; i < size; i++) {
+    const fm = fms.get(i);
+    const sid = fm?.expressID ?? fm?.ExpressID;
+    if (sid == null || !spaceIdSet.has(sid)) continue;
+    if (firstMeshPerSpace && perSpace.has(sid)) continue;
+
+    const stats = perSpace.get(sid) ?? { area: 0, volume: 0, tris: 0 };
+    consumeFlatMeshForSpace(api, modelID, fm, stats);
+
+    if (stats.tris > 0) {
+      perSpace.set(sid, stats);
+      totalTris += stats.tris;
+      if (triangleLimit && totalTris > triangleLimit) break;
+    }
+  }
+
+  finalizeExtents(perSpace);
+  return perSpace;
+}
+
+function finalizeExtents(perSpace: Map<number, GeoStats>) {
   for (const [k, s] of perSpace) {
     if (!isFinite(s.minZ!)) s.minZ = undefined;
     if (!isFinite(s.maxZ!)) s.maxZ = undefined;
   }
-
-  return perSpace;
 }
 
 /* ------------------------- Property-/Quantity-Lesen ------------------------ */
@@ -294,10 +359,21 @@ function collectAllParamsForSpace(
 /* --------------------------------- EXPORT --------------------------------- */
 
 export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
+  const {
+    allParams,
+    useGeometry,
+    forceGeometry,
+    extraParams,
+    renameMap,
+    round,
+    triangleLimit = 3_000_000,
+    firstMeshPerSpace = false,
+  } = opts;
+
   const api = new IfcAPI();
   await api.Init();
 
-  // Buffer → Uint8Array (korrekt mit Offsets)
+  // Buffer → Uint8Array korrekt mappen
   const u8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   const modelID = api.OpenModel(u8);
 
@@ -309,12 +385,12 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
     const projectNames     = buildNameIndex(api as any, modelID, IFCPROJECT);
     const storeyNames      = buildNameIndex(api as any, modelID, IFCBUILDINGSTOREY);
 
-    // Optional: Geometrie nur EINMAL streamen
+    // Geometrie nur einmal für Spaces sammeln (robuste Pfade)
     let geoBySpace: Map<number, GeoStats> | undefined;
-    if (opts.useGeometry || opts.forceGeometry) {
-      geoBySpace = collectSpaceGeometryFast(api as any, modelID, spaceIdSet, {
-        triangleLimit: 3_000_000,
-        firstMeshPerSpace: false,
+    if (useGeometry || forceGeometry) {
+      geoBySpace = collectSpaceGeometry(api as any, modelID, spaceIdSet, {
+        triangleLimit,
+        firstMeshPerSpace,
       });
     }
 
@@ -342,13 +418,13 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
         if (s?.Elevation != null) row['Storey Elevation'] = s.Elevation;
       }
 
-      if (opts.extraParams?.length) {
-        for (const p of opts.extraParams) {
+      if (extraParams?.length) {
+        for (const p of extraParams) {
           try { setIfDefined(row, p, unwrapNominal(sp?.[p])); } catch {}
         }
       }
 
-      if (opts.allParams) {
+      if (allParams) {
         Object.assign(row, collectAllParamsForSpace(api as any, modelID, id, relDefinesIndex));
       } else {
         const extras = collectAllParamsForSpace(api as any, modelID, id, relDefinesIndex);
@@ -359,11 +435,14 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
       if (geoBySpace) {
         const g = geoBySpace.get(id);
         if (g) {
-          if (g.minZ !== undefined) row['Base Elevation'] = g.minZ;
-          if (g.maxZ !== undefined) row['Top Elevation']  = g.maxZ;
+          if (g.minZ !== undefined) row['Base Elevation'] = roundIf(g.minZ, round);
+          if (g.maxZ !== undefined) row['Top Elevation']  = roundIf(g.maxZ, round);
 
-          if (opts.forceGeometry || row.Area == null)   row.Area   = g.area;
-          if (opts.forceGeometry || row.Volume == null) row.Volume = g.volume;
+          const a = roundIf(g.area, round);
+          const v = roundIf(g.volume, round);
+
+          if (forceGeometry || row.Area == null)   row.Area   = a;
+          if (forceGeometry || row.Volume == null) row.Volume = v;
         }
       }
 
@@ -371,9 +450,9 @@ export async function runQtoOnIFC(buffer: Buffer, opts: QtoOptions = {}) {
     }
 
     // Rename
-    if (opts.renameMap && Object.keys(opts.renameMap).length) {
+    if (renameMap && Object.keys(renameMap).length) {
       for (const r of rows) {
-        for (const [oldKey, newKey] of Object.entries(opts.renameMap)) {
+        for (const [oldKey, newKey] of Object.entries(renameMap)) {
           if (oldKey in r) {
             r[newKey] = r[oldKey];
             if (newKey !== oldKey) delete r[oldKey];
