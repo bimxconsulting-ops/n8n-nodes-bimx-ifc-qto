@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
   "author": "BIM X",
   "license": "MIT",
@@ -19,7 +19,9 @@
       "dist/nodes/IfcParameterExplorer.node.js",
       "dist/nodes/BimxIfcAttributeExport.node.js",
       "dist/nodes/BimxTableFilter.node.js",
-      "dist/nodes/BimxWatch.node.js"
+      "dist/nodes/BimxWatch.node.js",
+      "dist/nodes/BimxRuleValidator.node.js",
+      "dist/nodes/BimxBcsvBuilder.node.js"
     ],
     "credentials": []
   },
@@ -29,6 +31,7 @@
     "pack": "npm run build && npm pack"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "web-ifc": "^0.0.51",
     "xlsx": "^0.18.5"
   },
