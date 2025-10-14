@@ -108,11 +108,11 @@ function extractQuantities(api: any, modelID: number, qtoLine: any) {
 	return out;
 }
 
-/* ------------------------------ Scope ------------------------------------- */
+/* ------------------------------ Scope/Parsing ------------------------------ */
 
 type Scope = 'spaces' | 'custom' | 'all';
 
-function parseCustomTypeList(list: string): number[] {
+function parseTypeList(list: string): number[] {
 	return (list ?? '')
 		.split(',')
 		.map((s) => s.trim())
@@ -121,24 +121,32 @@ function parseCustomTypeList(list: string): number[] {
 		.filter((v): v is number => typeof v === 'number');
 }
 
-function getIfcTypeConstantsForScope(scope: Scope, customList?: string): number[] {
-	if (scope === 'spaces') return [IFCSPACE];
-	if (scope === 'custom') return parseCustomTypeList(customList ?? '');
+function getIfcTypeConstantsForScope(scope: Scope, customList: string | undefined, excludeList: string | undefined): number[] {
+	const excludeSet = new Set<number>(parseTypeList(excludeList ?? ''));
 
-	// scope === 'all' -> alle Entitäten außer IFCREL*
+	if (scope === 'spaces') {
+		const types = [IFCSPACE];
+		return types.filter((t) => !excludeSet.has(t));
+	}
+	if (scope === 'custom') {
+		const types = parseTypeList(customList ?? '');
+		return types.filter((t) => !excludeSet.has(t));
+	}
+
+	// scope === 'all' -> alle Entitäten außer IFCREL*, danach Exclude anwenden
 	const entries = Object.entries(WEBIFC).filter(([k, v]) => k.startsWith('IFC') && typeof v === 'number');
 	const filtered = entries
 		.filter(([k]) => !k.startsWith('IFCREL'))
-		.map(([, v]) => v as number);
+		.map(([, v]) => v as number)
+		.filter((t) => !excludeSet.has(t));
 	return filtered;
 }
 
 /**
  * Prüft heuristisch, ob eine Entität "rooted" ist (IfcRoot-Ableitung)
- * -> besitzt i. d. R. ein GlobalId-Feld. Das ist die generische,
- * dateiübergreifend robuste Art, „echte Objekte“ zu erkennen.
+ * -> besitzt i. d. R. ein GlobalId-Feld.
  */
-function isRootedEntitySample(api: any, modelID: number, typeConst: number, vec: any): boolean {
+function isRootedEntitySample(api: any, modelID: number, _typeConst: number, vec: any): boolean {
 	const firstIds = getVectorFirstIds(vec, 5);
 	for (const id of firstIds) {
 		const line = api.GetLine(modelID, id);
@@ -189,6 +197,14 @@ export class BimxIfcAttributeExport implements INodeType {
 				displayOptions: { show: { entityScope: ['custom'] } },
 			},
 			{
+				displayName: 'Exclude IFC Types',
+				name: 'excludeIfcTypes',
+				type: 'string',
+				placeholder: 'IFCPROPERTYSET,IFCBUILDING,IFCBUILDINGSTOREY,IFCPROJECT',
+				default: 'IFCPROPERTYSET,IFCBUILDING,IFCBUILDINGSTOREY,IFCPROJECT',
+				description: 'Comma-separated WEB-IFC constants to exclude from export',
+			},
+			{
 				displayName: 'Row Layout',
 				name: 'rowLayout',
 				type: 'options',
@@ -217,6 +233,7 @@ export class BimxIfcAttributeExport implements INodeType {
 			const binProp = this.getNodeParameter('binaryProperty', i) as string;
 			const scope = this.getNodeParameter('entityScope', i, 'custom') as Scope;
 			const customList = this.getNodeParameter('customIfcTypes', i, '') as string;
+			const excludeList = this.getNodeParameter('excludeIfcTypes', i, '') as string;
 			const rowLayout = this.getNodeParameter('rowLayout', i, 'wide') as 'wide' | 'long';
 			const includeCore = this.getNodeParameter('includeCore', i, true) as boolean;
 			const wantXlsx = this.getNodeParameter('xlsx', i, false) as boolean;
@@ -237,12 +254,12 @@ export class BimxIfcAttributeExport implements INodeType {
 
 			try {
 				const relIndex = buildRelDefinesIndex(api as any, modelID);
-				const candidateTypeIds = getIfcTypeConstantsForScope(scope, customList);
+				const candidateTypeIds = getIfcTypeConstantsForScope(scope, customList, excludeList);
 
 				if (!candidateTypeIds.length) {
 					throw new NodeOperationError(
 						this.getNode(),
-						'No IFC types to export (check Entity Scope / Custom IFC Types).',
+						'No IFC types to export (check Entity Scope / Custom / Exclude lists).',
 						{ itemIndex: i },
 					);
 				}
@@ -252,7 +269,7 @@ export class BimxIfcAttributeExport implements INodeType {
 				for (const typeConst of candidateTypeIds) {
 					const vec = api.GetLineIDsWithType(modelID, typeConst);
 					if (vectorSize(vec) === 0) continue;
-					if (!isRootedEntitySample(api, modelID, typeConst, vec)) continue; // <<< Kern-Änderung
+					if (!isRootedEntitySample(api, modelID, typeConst, vec)) continue;
 					presentVectors.push({ typeConst, vec });
 				}
 
@@ -270,7 +287,7 @@ export class BimxIfcAttributeExport implements INodeType {
 						const line = api.GetLine(modelID, id);
 						if (!line) return;
 
-						// Sicherheitshalber auch zur Laufzeit filtern (falls einzelne Ausreißer ohne GlobalId existieren)
+						// Fallback-Schutz: einzelne ohne GlobalId überspringen
 						if (!('GlobalId' in line)) return;
 
 						const typeName = TYPE_NAME_BY_ID.get(line.type) ?? `IFC#${line.type}`;
@@ -355,9 +372,7 @@ export class BimxIfcAttributeExport implements INodeType {
 
 				out.push(result);
 			} finally {
-				try {
-					api.CloseModel(modelID);
-				} catch {}
+				try { api.CloseModel(modelID); } catch {}
 			}
 		}
 
