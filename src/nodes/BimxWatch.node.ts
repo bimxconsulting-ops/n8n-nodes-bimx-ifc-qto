@@ -6,7 +6,6 @@ import type {
   INodeTypeDescription,
 } from 'n8n-workflow';
 
-/** kleine Helfer */
 function inferType(v: any): string {
   if (v === null || v === undefined) return 'null';
   if (typeof v === 'boolean') return 'boolean';
@@ -20,21 +19,39 @@ function inferType(v: any): string {
   if (typeof v === 'object') return 'object';
   return typeof v;
 }
-const isNullish = (v: any) => v === null || v === undefined;
-const esc = (s: any) =>
-  String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+
+function toPlainObject(o: any, maxDepth = 2, prefix = '', out: Record<string, any> = {}) {
+  if (o == null || typeof o !== 'object' || maxDepth < 0) {
+    out[prefix || 'value'] = o;
+    return out;
+  }
+  const isArr = Array.isArray(o);
+  const keys = isArr ? Object.keys(o) : Object.keys(o as object);
+  if (!keys.length) {
+    out[prefix || 'value'] = isArr ? [] : {};
+    return out;
+  }
+  for (const k of keys) {
+    const key = isArr ? String(k) : k;
+    const val: any = (o as any)[key];
+    const next = prefix ? `${prefix}.${key}` : key;
+    if (val && typeof val === 'object' && maxDepth > 0) {
+      toPlainObject(val, maxDepth - 1, next, out);
+    } else {
+      out[next] = val;
+    }
+  }
+  return out;
+}
 
 export class BimxWatch implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'BIM X – Watch',
     name: 'bimxWatch',
+    icon: 'file:BIMX.svg',
     group: ['transform'],
     version: 1,
-    icon: 'file:BIMX.svg',
-    description: 'Tap between nodes to preview items, schema and quick charts',
+    description: 'Schneller Datenblick: Vorschau, Schema, optionale HTML-Übersicht',
     defaults: { name: 'BIM X – Watch' },
     inputs: ['main'],
     outputs: ['main', 'main'],
@@ -82,7 +99,7 @@ export class BimxWatch implements INodeType {
         default: false,
       },
 
-      // ---------- HTML Preview ----------
+      // ---------- HTML Preview section ----------
       {
         displayName: 'Emit HTML Preview',
         name: 'emitHtml',
@@ -94,11 +111,8 @@ export class BimxWatch implements INodeType {
         name: 'groupBy',
         type: 'string',
         default: '',
-        description:
-          'Optional column to aggregate counts by (e.g. "Level", "Category"). Leave empty to auto-pick a string column.',
-        displayOptions: {
-          show: { emitHtml: [true] },
-        },
+        description: 'Leer lassen für Auto-Auswahl',
+        displayOptions: { show: { emitHtml: [true] } },
       },
       {
         displayName: 'Table Row Limit',
@@ -106,31 +120,23 @@ export class BimxWatch implements INodeType {
         type: 'number',
         default: 200,
         typeOptions: { minValue: 1, maxValue: 5000 },
-        description: 'Max rows rendered into the HTML table',
-        displayOptions: {
-          show: { emitHtml: [true] },
-        },
+        displayOptions: { show: { emitHtml: [true] } },
       },
       {
         displayName: 'Report Title',
         name: 'reportTitle',
         type: 'string',
         default: 'BIM X – Watch Preview',
-        displayOptions: {
-          show: { emitHtml: [true] },
-        },
+        displayOptions: { show: { emitHtml: [true] } },
       },
     ],
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const total = items.length;
 
-    const sampleMode = this.getNodeParameter('sampleMode', 0) as
-      | 'firstN'
-      | 'lastN'
-      | 'randomN';
+    // ---- parameters (with safe defaults) ----
+    const sampleMode = this.getNodeParameter('sampleMode', 0) as 'firstN' | 'lastN' | 'randomN';
     const sampleSize = this.getNodeParameter('sampleSize', 0) as number;
     const maxStringLen = this.getNodeParameter('maxStringLen', 0) as number;
     const inferTypesFlag = this.getNodeParameter('inferTypes', 0) as boolean;
@@ -138,27 +144,43 @@ export class BimxWatch implements INodeType {
     const outputMetaOnly = this.getNodeParameter('outputMetaOnly', 0) as boolean;
 
     const emitHtml = this.getNodeParameter('emitHtml', 0) as boolean;
-    const groupBy = (this.getNodeParameter('groupBy', 0) as string || '').trim();
-    const tableLimit = this.getNodeParameter('tableLimit', 0) as number;
-    const reportTitle = this.getNodeParameter('reportTitle', 0) as string;
+    // IMPORTANT: provide defaults even if property is hidden
+    const groupBy = this.getNodeParameter('groupBy', 0, '') as string;
+    const tableLimit = this.getNodeParameter('tableLimit', 0, 200) as number;
+    const reportTitle = this.getNodeParameter('reportTitle', 0, 'BIM X – Watch Preview') as string;
 
-    const n = Math.min(sampleSize, total);
-
-    // sampling
-    let indices: number[] = [];
-    if (sampleMode === 'firstN') {
-      indices = [...Array(n).keys()];
-    } else if (sampleMode === 'lastN') {
-      indices = Array.from({ length: n }, (_, i) => total - n + i);
+    // ---- derive row data ----
+    // case A: one item with json.rows (array)
+    let rows: Array<Record<string, any>> = [];
+    if (items.length === 1 && Array.isArray(items[0]?.json?.rows)) {
+      // Use the provided table
+      const arr = items[0].json.rows as Array<any>;
+      rows = arr.map((r) => toPlainObject(r, 1));
     } else {
-      const set = new Set<number>();
-      while (set.size < n) set.add(Math.floor(Math.random() * total));
-      indices = Array.from(set.values());
+      // case B: use incoming items as rows
+      rows = items.map((it) => toPlainObject(it.json ?? {}, 1));
     }
 
-    // preview rows (truncate)
+    const totalRows = rows.length;
+
+    // ---- sampling indices ----
+    const n = Math.min(sampleSize, Math.max(0, totalRows));
+    let indices: number[] = [];
+    if (n > 0) {
+      if (sampleMode === 'firstN') {
+        indices = Array.from({ length: n }, (_, i) => i);
+      } else if (sampleMode === 'lastN') {
+        indices = Array.from({ length: n }, (_, i) => totalRows - n + i);
+      } else {
+        const set = new Set<number>();
+        while (set.size < n) set.add(Math.floor(Math.random() * totalRows));
+        indices = Array.from(set.values());
+      }
+    }
+
+    // ---- truncate long strings for preview ----
     const previewRows = indices.map((i) => {
-      const data = { ...(items[i].json || {}) };
+      const data = { ...(rows[i] || {}) };
       for (const k of Object.keys(data)) {
         const v = (data as any)[k];
         if (typeof v === 'string' && v.length > maxStringLen) {
@@ -168,170 +190,104 @@ export class BimxWatch implements INodeType {
       return data;
     });
 
-    // schema + fill stats
-    const schema: Record<
-      string,
-      { types: Record<string, number>; nulls: number; uniques: number; filled: number }
-    > = {};
-    const allKeys = new Set<string>();
-    for (const it of items) Object.keys(it.json || {}).forEach((k) => allKeys.add(k));
-
-    if (includeSchema && total > 0) {
+    // ---- schema + fill rate ----
+    const schema: Record<string, { types: Record<string, number>; nulls: number; uniques: number }> = {};
+    const fillRate: Record<string, number> = {};
+    if (includeSchema && totalRows > 0) {
+      const allKeys = new Set<string>();
+      rows.forEach((r) => Object.keys(r).forEach((k) => allKeys.add(k)));
       for (const k of allKeys) {
         const typesCount: Record<string, number> = {};
         const seen = new Set<string>();
         let nulls = 0;
         let filled = 0;
-        for (const it of items) {
-          const v = (it.json as any)[k];
-          if (isNullish(v) || v === '') {
+        for (const r of rows) {
+          const v = (r as any)[k];
+          if (v === null || v === undefined || v === '') {
             nulls++;
-            continue;
+          } else {
+            filled++;
+            const t = inferTypesFlag ? inferType(v) : typeof v;
+            typesCount[t] = (typesCount[t] || 0) + 1;
+            if (['string', 'number', 'boolean'].includes(typeof v)) seen.add(String(v));
           }
-          filled++;
-          const t = inferTypesFlag ? inferType(v) : typeof v;
-          typesCount[t] = (typesCount[t] || 0) + 1;
-          if (['string', 'number', 'boolean'].includes(typeof v)) seen.add(String(v));
         }
-        schema[k] = { types: typesCount, nulls, uniques: seen.size, filled };
+        schema[k] = { types: typesCount, nulls, uniques: seen.size };
+        fillRate[k] = Math.round((filled / totalRows) * 100);
       }
     }
 
-    // group counts (for chart)
-    let groupKey = groupBy;
-    if (!groupKey) {
-      // auto-pick: first string-ish field seen in sampled rows
-      const first = previewRows[0] || {};
-      const tryKey =
-        Object.keys(first).find((k) => typeof (first as any)[k] === 'string') ||
-        Array.from(allKeys)[0];
-      groupKey = tryKey || '';
-    }
+    // ---- group counts (for chart) ----
+    const pickGroupKey = (): string => {
+      if (groupBy && rows[0] && groupBy in rows[0]) return groupBy;
+      // auto-pick: first string-like column
+      const keys = Object.keys(rows[0] || {});
+      for (const k of keys) {
+        const v = (rows[0] as any)[k];
+        if (typeof v === 'string') return k;
+      }
+      return keys[0] || '';
+    };
+    const groupKey = totalRows > 0 ? pickGroupKey() : '';
 
     const groupCounts: Record<string, number> = {};
     if (groupKey) {
-      for (const it of items) {
-        const raw = (it.json as any)[groupKey];
-        const label =
-          isNullish(raw) || raw === '' ? '(empty)' : String(raw).slice(0, 80);
-        groupCounts[label] = (groupCounts[label] || 0) + 1;
-      }
-      // Top 20 + Others
-      const sorted = Object.entries(groupCounts).sort((a, b) => b[1] - a[1]);
-      if (sorted.length > 20) {
-        const top = sorted.slice(0, 20);
-        const restSum = sorted.slice(20).reduce((s, [, v]) => s + v, 0);
-        top.push(['(others)', restSum]);
-        for (const k of Object.keys(groupCounts)) delete groupCounts[k];
-        for (const [k, v] of top) groupCounts[k] = v;
+      for (const r of rows) {
+        const raw = (r as any)[groupKey];
+        const key = (raw === null || raw === undefined || raw === '') ? '(empty)' : String(raw);
+        groupCounts[key] = (groupCounts[key] || 0) + 1;
       }
     }
 
-    // meta JSON item for output2
+    // ---- meta json for output 2 ----
     const meta: any = {
-      totalItems: total,
-      sampleMode,
-      sampleSize: n,
-      preview: previewRows,
-      schemaKeys: Array.from(allKeys),
-      schema: includeSchema ? schema : undefined,
-      groupBy: groupKey || undefined,
-      groupCounts: groupKey ? groupCounts : undefined,
-      generatedAt: new Date().toISOString(),
+      watch: {
+        totalItems: totalRows,
+        sampleMode,
+        sampleSize: n,
+        preview: previewRows,
+        schema: includeSchema ? schema : undefined,
+        fillRate,
+        groupBy: groupKey || null,
+        groupCounts,
+      },
     };
 
-    const metaItem: INodeExecutionData = { json: { watch: meta } };
+    const out2: INodeExecutionData = { json: meta };
 
-    // optional HTML
+    // ---- optional HTML preview (binary) ----
     if (emitHtml) {
-      // columns for table
-      const cols = Array.from(allKeys);
-      const limitedRows = items.slice(0, Math.min(tableLimit, items.length)).map((it) => it.json || {});
+      const now = new Date().toLocaleString('de-DE');
+      const cols = Object.keys(previewRows[0] || {});
+      const limited = previewRows.slice(0, Math.max(1, tableLimit));
 
-      // fill percentages
-      const fillPairs = Object.entries(schema).map(([k, v]) => [
-        k,
-        total > 0 ? Math.round((100 * (v?.filled || 0)) / total) : 0,
-      ]) as Array<[string, number]>;
-      fillPairs.sort((a, b) => b[1] - a[1]);
-      const topFill = fillPairs.slice(0, 30); // keep charts readable
+      // chart data
+      const groupLabels = Object.keys(groupCounts);
+      const groupValues = groupLabels.map((k) => groupCounts[k]);
 
-      const html = buildHtml({
-        title: reportTitle || 'BIM X – Watch Preview',
-        total,
-        colCount: cols.length,
-        tableHeaders: cols,
-        tableRows: limitedRows,
-        groupKey: groupKey || '',
-        groupCounts,
-        fillRates: topFill, // [name, pct]
-        generatedAt: new Date().toLocaleString('de-DE'),
-      });
+      const fillLabels = Object.keys(fillRate);
+      const fillValues = fillLabels.map((k) => fillRate[k]);
 
-      const bin = await this.helpers.prepareBinaryData(Buffer.from(html, 'utf8'));
-      bin.fileName = 'bimx_watch_preview.html';
-      bin.mimeType = 'text/html';
+      // small HTML (no images, pure client-side chart.js)
+      const tableHead = `<tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr>`;
+      const tableBody =
+        limited
+          .map((row) => {
+            const tds = cols.map((c) => {
+              const v = row[c];
+              if (v === null || v === undefined) return '<td></td>';
+              return `<td>${String(v).replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' } as any)[m])}</td>`;
+            });
+            return `<tr>${tds.join('')}</tr>`;
+          })
+          .join('');
 
-      // anhängen an metaItem
-      metaItem.binary = { html: bin };
-    }
-
-    const output1 = outputMetaOnly ? [] : items;
-    const output2 = [metaItem];
-    return [output1, output2];
-  }
-}
-
-/** HTML-Report (leichtgewichtig, ohne Kosten-Teil, angelehnt an deinen Stil) */
-function buildHtml(opts: {
-  title: string;
-  total: number;
-  colCount: number;
-  tableHeaders: string[];
-  tableRows: Array<Record<string, any>>;
-  groupKey: string;
-  groupCounts: Record<string, number>;
-  fillRates: Array<[string, number]>;
-  generatedAt: string;
-}) {
-  const {
-    title,
-    total,
-    colCount,
-    tableHeaders,
-    tableRows,
-    groupKey,
-    groupCounts,
-    fillRates,
-    generatedAt,
-  } = opts;
-
-  const headersHtml = tableHeaders
-    .map((h) => `<th>${esc(h)}</th>`)
-    .join('');
-
-  const rowsHtml = tableRows
-    .map((row) => {
-      const tds = tableHeaders
-        .map((h) => `<td>${esc((row as any)[h])}</td>`)
-        .join('');
-      return `<tr>${tds}</tr>`;
-    })
-    .join('');
-
-  // charts data
-  const groupLabels = Object.keys(groupCounts || {});
-  const groupValues = groupLabels.map((k) => groupCounts[k]);
-
-  const fillLabels = fillRates.map(([k]) => k);
-  const fillValues = fillRates.map(([, v]) => v);
-
-  return `<!doctype html>
+      const html = `<!doctype html>
 <html lang="de">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>${esc(title)}</title>
+<title>${reportTitle}</title>
 <style>
   :root{
     --card:#ffffff; --ink:#111827; --muted:#6b7280; --border:#e5e7eb;
@@ -387,33 +343,21 @@ function buildHtml(opts: {
 <body>
   <div class="container">
     <div class="hero">
-      <h1>${esc(title)}</h1>
-      <p>Quick preview generated ${esc(generatedAt)}</p>
+      <h1>${reportTitle}</h1>
+      <p>Quick preview generated ${now}</p>
     </div>
 
     <div class="summary">
-      <div class="kpi">
-        <h3>Items</h3>
-        <div class="value">${total.toLocaleString('de-DE')}</div>
-      </div>
-      <div class="kpi">
-        <h3>Columns</h3>
-        <div class="value">${colCount.toLocaleString('de-DE')}</div>
-      </div>
-      ${
-        groupKey
-          ? `<div class="kpi"><h3>Group by</h3><div class="value" style="font-size:1.1rem">${esc(
-              groupKey,
-            )}</div></div>`
-          : ''
-      }
+      <div class="kpi"><h3>Items</h3><div class="value">${totalRows}</div></div>
+      <div class="kpi"><h3>Columns</h3><div class="value">${cols.length}</div></div>
+      <div class="kpi"><h3>Group by</h3><div class="value" style="font-size:1.1rem">${groupKey || '(auto n/a)'}</div></div>
     </div>
 
     <div class="section">
       <h2>Charts</h2>
       <div class="charts">
         <div class="chart-card">
-          <h3>${groupKey ? `Counts by “${esc(groupKey)}”` : 'Counts'}</h3>
+          <h3>Counts by “${groupKey || '—'}”</h3>
           <canvas id="chartGroup"></canvas>
         </div>
         <div class="chart-card">
@@ -424,11 +368,11 @@ function buildHtml(opts: {
     </div>
 
     <div class="section">
-      <h2>Table Preview (${tableRows.length.toLocaleString('de-DE')} rows)</h2>
+      <h2>Table Preview (${limited.length} rows)</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr>${headersHtml}</tr></thead>
-          <tbody>${rowsHtml}</tbody>
+          <thead>${tableHead}</thead>
+          <tbody>${tableBody}</tbody>
         </table>
       </div>
     </div>
@@ -436,7 +380,6 @@ function buildHtml(opts: {
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
-    // Data from Node
     const groupLabels = ${JSON.stringify(groupLabels)};
     const groupValues = ${JSON.stringify(groupValues)};
     const fillLabels  = ${JSON.stringify(fillLabels)};
@@ -448,11 +391,11 @@ function buildHtml(opts: {
       const out=[], seg=stops.length-1;
       for(let i=0;i<n;i++){
         const t=i/(n-1), pos=t*seg, i0=Math.floor(pos), f=pos-i0;
-        const c0=stops[i0].match(/[0-9a-f]{2}/gi).map(h=>parseInt(h,16));
-        const c1=stops[Math.min(i0+1,seg)].match(/[0-9a-f]{2}/gi).map(h=>parseInt(h,16));
-        const r=Math.round(c0[0]+(c1[0]-c0[0])*f);
-        const g=Math.round(c0[1]+(c1[1]-c0[1])*f);
-        const b=Math.round(c0[2]+(c1[2]-c0[2])*f);
+        const hexToRgb = h => ({ r:parseInt(h.slice(1,3),16), g:parseInt(h.slice(3,5),16), b:parseInt(h.slice(5,7),16) });
+        const c0=hexToRgb(stops[i0]), c1=hexToRgb(stops[Math.min(i0+1,seg)]);
+        const r=Math.round(c0.r+(c1.r-c0.r)*f);
+        const g=Math.round(c0.g+(c1.g-c0.g)*f);
+        const b=Math.round(c0.b+(c1.b-c0.b)*f);
         out.push('#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join(''));
       }
       return out;
@@ -489,4 +432,16 @@ function buildHtml(opts: {
   </script>
 </body>
 </html>`;
+
+      const buf = Buffer.from(html, 'utf8');
+      const bin = await this.helpers.prepareBinaryData(buf);
+      bin.fileName = 'bimx_watch_preview.html';
+      bin.mimeType = 'text/html';
+      (out2 as any).binary = { html: bin };
+    }
+
+    // output 1 (pass-through) + output 2 (meta/preview)
+    const out1 = outputMetaOnly ? [] : items;
+    return [out1, [out2]];
+  }
 }
