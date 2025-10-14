@@ -34,7 +34,7 @@ interface Rule {
   op: Operator;
   value?: string;
   color?: ColorName;
-  ifcType?: string;     // optionaler Filter (z.B. "IFCSPACE,IFCDOOR")
+  ifcType?: string;     // optional "IFCSPACE,IFCDOOR"
 }
 
 interface RuleHit {
@@ -304,7 +304,7 @@ export class BimxRuleValidator implements INodeType {
     const emitJson = this.getNodeParameter('emitJson', 0) as boolean;
     const emitCsv = this.getNodeParameter('emitCsv', 0) as boolean;
 
-    // ---------- Load rows ----------
+    /* ------------------------------- Load rows ------------------------------ */
     const rows: Array<Record<string, any>> = [];
 
     if (source === 'items') {
@@ -348,7 +348,7 @@ export class BimxRuleValidator implements INodeType {
       }
     }
 
-    // ---------- Evaluate rules ----------
+    /* ---------------------------- Evaluate rules --------------------------- */
     const hits: RuleHit[] = [];
     const guidsPerRule: Array<{
       ruleIndex: number;
@@ -387,7 +387,7 @@ export class BimxRuleValidator implements INodeType {
       });
     });
 
-    // ---------- Build outputs ----------
+    /* ----------------------------- Build outputs --------------------------- */
     const outMain: INodeExecutionData[] = [];
     const outBranch2: INodeExecutionData[] = [];
 
@@ -409,11 +409,9 @@ export class BimxRuleValidator implements INodeType {
       wb.creator = 'BIM X – Rule Validator';
       wb.created = new Date();
 
-      // Data sheet (TS: WorksheetView typing kann zicken → casten)
-      const ws = wb.addWorksheet(
-        'Data',
-        { views: [{ state: 'frozen', ySplit: 1 } as any] } as any,
-      );
+      // Data sheet (kein 2. Parameter → vermeidet Overload-Fehler)
+      const ws = wb.addWorksheet('Data');
+      (ws as any).views = [{ state: 'frozen', ySplit: 1 }];
 
       // Headers (Union aller Keys)
       const headers = Array.from(
@@ -424,8 +422,13 @@ export class BimxRuleValidator implements INodeType {
       );
 
       // plus Violations column
-      const headerRow = ws.addRow([...headers, 'Violations']);
-      // Style für Header-Zeile zellenweise setzen (Row.font ist nicht immer getypt)
+      ws.columns = [
+        ...headers.map((h) => ({ header: h, key: h })),
+        { header: 'Violations', key: '__violations__' },
+      ] as any;
+
+      // Header style
+      const headerRow = ws.getRow(1);
       headerRow.eachCell((cell) => {
         (cell as any).font = { bold: true };
         (cell as any).fill = {
@@ -450,19 +453,18 @@ export class BimxRuleValidator implements INodeType {
         rec.titles.push(h.ruleTitle);
       }
 
-      // Rows
+      // Data rows
       rows.forEach((r, i) => {
-        const vals = headers.map((h) => r[h]);
         const vio = byRow.get(i)?.titles.join(' | ') ?? '';
-        const row = ws.addRow([...vals, vio]);
+        const row = ws.addRow({ ...(r as any), __violations__: vio });
 
         // Coloring per rule field
         const rec = byRow.get(i);
         if (rec) {
-          headers.forEach((h, idx) => {
+          headers.forEach((h) => {
             if (rec.fields.has(h)) {
               const col = rec.fields.get(h);
-              const cell = row.getCell(idx + 1) as any;
+              const cell = row.getCell(h) as any; // key access
               if (col === 'red') cell.fill = FILL_RED as any;
               else if (col === 'yellow') cell.fill = FILL_YEL as any;
             }
@@ -470,14 +472,24 @@ export class BimxRuleValidator implements INodeType {
         }
       });
 
-      // Auto width (Typing-locker)
-      (ws.columns || []).forEach((c: any) => {
-        let max = 10;
-        (c as any).eachCell?.({ includeEmpty: true }, (cell: any) => {
-          const v = cell?.value == null ? '' : String(cell.value);
-          if (v.length > max) max = Math.min(v.length, 60);
+      // Spaltenbreiten (einfach, ohne eachCell-Overload): header- & value-length scannen
+      const maxLen: Record<string, number> = {};
+      headers.concat(['__violations__']).forEach((k) => {
+        maxLen[k] = Math.max(10, String(k === '__violations__' ? 'Violations' : k).length);
+      });
+      rows.forEach((r, i) => {
+        headers.forEach((h) => {
+          const v = r[h];
+          const s = v == null ? '' : String(v);
+          maxLen[h] = Math.min(Math.max(maxLen[h], s.length), 60);
         });
-        (c as any).width = max + 2;
+        const vio = byRow.get(i)?.titles.join(' | ') ?? '';
+        maxLen['__violations__'] = Math.min(Math.max(maxLen['__violations__'], vio.length), 80);
+      });
+      (ws.columns || []).forEach((c: any) => {
+        const key = c.key as string;
+        const ml = maxLen[key] ?? 12;
+        c.width = Math.max(ml + 2, 10);
       });
 
       // Summary sheet
@@ -520,12 +532,12 @@ export class BimxRuleValidator implements INodeType {
           wsGuid.addRow([rec.ruleIndex + 1, rec.ruleTitle, g]);
       });
 
-      // Buffer – writeBuffer() liefert je nach Umgebung Buffer/ArrayBuffer (typing tricky)
-      const xbuf: any = await wb.xlsx.writeBuffer();
-      const nodeBuf: Buffer = Buffer.isBuffer(xbuf)
-        ? (xbuf as Buffer)
-        : Buffer.from(xbuf as ArrayBuffer);
-      const bin = await this.helpers.prepareBinaryData(nodeBuf);
+      // Buffer – writeBuffer() → robust auf Node-Buffer abbilden
+      const rawBuf: any = await (wb.xlsx as any).writeBuffer();
+      const nodeBuf: Buffer = Buffer.isBuffer(rawBuf)
+        ? (rawBuf as Buffer)
+        : Buffer.from(rawBuf as ArrayBuffer);
+      const bin = await this.helpers.prepareBinaryData(nodeBuf as Buffer);
       bin.fileName = 'validation_report.xlsx';
       bin.mimeType =
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -540,11 +552,11 @@ export class BimxRuleValidator implements INodeType {
     }
 
     if (emitCsv) {
-      // one CSV per rule, concatenated as multiple items
+      // one CSV per rule, als weitere Items
       for (const rec of guidsPerRule) {
         const csv = toCsv(rec.guids.map((g) => ({ rule: rec.ruleTitle, guid: g })));
         const bin = await this.helpers.prepareBinaryData(
-          Buffer.from(csv, 'utf8'),
+          Buffer.from(csv, 'utf8') as Buffer,
         );
         bin.fileName = `guids_${(rec.ruleTitle || `rule_${rec.ruleIndex + 1}`)}.csv`;
         bin.mimeType = 'text/csv';
