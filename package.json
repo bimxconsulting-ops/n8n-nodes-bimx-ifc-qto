@@ -16,7 +16,9 @@
     "n8nNodesApiVersion": "1",
     "nodes": [
       "dist/nodes/BimxIfcSpaceQto.node.js",
-      "dist/nodes/IfcParameterExplorer.node.js"
+      "dist/nodes/IfcParameterExplorer.node.js",
+      "dist/nodes/BimxIfcAttributeExport.node.js",
+      "dist/nodes/BimxTableFilter.node.js"
     ],
     "credentials": []
   },
