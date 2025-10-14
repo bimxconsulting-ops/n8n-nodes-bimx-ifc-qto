@@ -8,19 +8,16 @@ import type {
 import { NodeOperationError } from 'n8n-workflow';
 
 import * as XLSX from 'xlsx';
-
-// Wir brauchen IfcAPI für das Model-Handling und das gesamte WEBIFC-Enum für Typ-Konstanten
 import { IfcAPI } from 'web-ifc';
 import * as WEBIFC from 'web-ifc';
-
-// gleiches Icon wie beim Space-QTO
-// (wird im Build per copy-assets.cjs nach dist/nodes kopiert)
 import { toBuffer } from '../utils/toBuffer';
 
-// ----------------------------- kleine Utils ---------------------------------
+/* ------------------------------ Helpers ----------------------------------- */
 
 function forEachIdVector(vec: any, cb: (id: number) => void) {
-	const size = typeof vec?.size === 'function' ? vec.size() : Array.isArray(vec) ? vec.length : 0;
+	const size =
+		typeof vec?.size === 'function' ? vec.size() :
+		Array.isArray(vec) ? vec.length : 0;
 	for (let i = 0; i < size; i++) {
 		const id = typeof vec?.get === 'function' ? vec.get(i) : vec[i];
 		if (id != null) cb(id as number);
@@ -40,9 +37,12 @@ const TYPE_NAME_BY_ID = new Map<number, string>(
 		.map(([k, v]) => [v as number, k]),
 );
 
-// ---------------------- Psets / Quantities aus RelDefines --------------------
-
-const { IFCRELDEFINESBYPROPERTIES, IFCPROPERTYSET, IFCELEMENTQUANTITY } = WEBIFC as any;
+const {
+	IFCRELDEFINESBYPROPERTIES,
+	IFCPROPERTYSET,
+	IFCELEMENTQUANTITY,
+	IFCSPACE,
+} = WEBIFC as any;
 
 function buildRelDefinesIndex(api: any, modelID: number) {
 	const byRelated = new Map<number, any[]>();
@@ -95,62 +95,43 @@ function extractQuantities(api: any, modelID: number, qtoLine: any) {
 	return out;
 }
 
-// -------------------------- Typauswahl (Scope) -------------------------------
+/* ------------------------------ Scope ------------------------------------- */
 
 type Scope = 'spaces' | 'custom' | 'all';
 
 function parseCustomTypeList(list: string): number[] {
-	const names = (list ?? '')
+	return (list ?? '')
 		.split(',')
 		.map((s) => s.trim())
-		.filter(Boolean);
-	const ids: number[] = [];
-	for (const n of names) {
-		const v = (WEBIFC as any)[n];
-		if (typeof v === 'number') ids.push(v);
-	}
-	return ids;
+		.filter(Boolean)
+		.map((name) => (WEBIFC as any)[name])
+		.filter((v): v is number => typeof v === 'number');
 }
 
-/**
- * Liefert die Liste von IFC Typ-IDs je nach Auswahl.
- * Bei "all" werden IFCREL* standardmäßig ausgelassen, damit keine reinen Beziehungszeilen exportiert werden.
- */
 function getIfcTypeConstantsForScope(scope: Scope, customList?: string): number[] {
-	if (scope === 'spaces') return [(WEBIFC as any).IFCSPACE];
+	if (scope === 'spaces') return [IFCSPACE];
+	if (scope === 'custom') return parseCustomTypeList(customList ?? '');
 
-	if (scope === 'custom') {
-		return parseCustomTypeList(customList ?? '');
-	}
-
-	// scope === 'all'
-	const all = Object.entries(WEBIFC)
-		.filter(([k, v]) => k.startsWith('IFC') && typeof v === 'number')
+	// scope === 'all' -> alle Entitäten außer IFCREL*
+	const entries = Object.entries(WEBIFC).filter(([k, v]) => k.startsWith('IFC') && typeof v === 'number');
+	const filtered = entries
+		.filter(([k]) => !k.startsWith('IFCREL'))
 		.map(([, v]) => v as number);
-
-	// Relationen meist nicht erwünscht
-	const relPrefix = new Set(['IFCREL']);
-	const filtered = Object.entries(WEBIFC)
-		.filter(([k, v]) => k.startsWith('IFC') && typeof v === 'number')
-		.filter(([k]) => !relPrefix.has(k.substring(0, 6)))
-		.map(([, v]) => v as number);
-
-	// Wenn gefiltert leer sein sollte, fallback auf all
-	return filtered.length ? filtered : all;
+	return filtered;
 }
 
-// ------------------------------- Node ----------------------------------------
+/* -------------------------------- Node ------------------------------------ */
 
 export class BimxIfcAttributeExport implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'BIM X – IFC Attribute Export',
+		displayName: 'BIM X - IFC Attribute Export',
 		name: 'bimxIfcAttributeExport',
 		icon: 'file:BIMX.svg',
 		group: ['transform'],
 		version: 1,
 		description:
-			'Exports attributes (Space/Pset/Qto/Core) from IFC as a flat table (XLSX or JSON). No geometry.',
-		defaults: { name: 'BIM X – IFC Attribute Export' },
+			'Exports attributes (Core/Pset/Qto) from IFC as a flat table. JSON for chaining, XLSX for download.',
+		defaults: { name: 'BIM X - IFC Attribute Export' },
 		inputs: ['main'],
 		outputs: ['main'],
 		properties: [
@@ -161,7 +142,6 @@ export class BimxIfcAttributeExport implements INodeType {
 				default: 'data',
 				description: 'Name of the binary property that contains the IFC file',
 			},
-			// ------------------- Scope -------------------
 			{
 				displayName: 'Entity Scope',
 				name: 'entityScope',
@@ -177,11 +157,11 @@ export class BimxIfcAttributeExport implements INodeType {
 				displayName: 'Custom IFC Types',
 				name: 'customIfcTypes',
 				type: 'string',
-				placeholder: 'IFCSPACE,IFCWALL,IFCDOOR,...',
-				default: 'IFCSPACE',
+				placeholder: 'IFCSPACE,IFCDOOR,IFCWALL',
+				// -> Default mit drei Beispiel-Typen, damit das Komma-Pattern klar ist
+				default: 'IFCSPACE,IFCDOOR,IFCWALL',
 				displayOptions: { show: { entityScope: ['custom'] } },
 			},
-			// ------------------- Layout -------------------
 			{
 				displayName: 'Row Layout',
 				name: 'rowLayout',
@@ -198,7 +178,6 @@ export class BimxIfcAttributeExport implements INodeType {
 				type: 'boolean',
 				default: true,
 			},
-			// ------------------- Outputs -------------------
 			{ displayName: 'Generate XLSX', name: 'xlsx', type: 'boolean', default: false },
 			{ displayName: 'Generate JSON', name: 'jsonOut', type: 'boolean', default: true },
 		],
@@ -219,11 +198,9 @@ export class BimxIfcAttributeExport implements INodeType {
 
 			const bin = items[i].binary?.[binProp];
 			if (!bin?.data) {
-				throw new NodeOperationError(
-					this.getNode(),
-					`Binary property "${binProp}" missing`,
-					{ itemIndex: i },
-				);
+				throw new NodeOperationError(this.getNode(), `Binary property "${binProp}" missing`, {
+					itemIndex: i,
+				});
 			}
 
 			const buffer = toBuffer(bin.data);
@@ -233,11 +210,9 @@ export class BimxIfcAttributeExport implements INodeType {
 			const modelID = api.OpenModel(new Uint8Array(buffer));
 
 			try {
-				// Indexe
 				const relIndex = buildRelDefinesIndex(api as any, modelID);
-
-				// Typen für Scope bestimmen
 				const typeIds = getIfcTypeConstantsForScope(scope, customList);
+
 				if (!typeIds.length) {
 					throw new NodeOperationError(
 						this.getNode(),
@@ -246,24 +221,26 @@ export class BimxIfcAttributeExport implements INodeType {
 					);
 				}
 
-				// Sammel-Tabellen
 				const wideRows: Array<Record<string, any>> = [];
 				const longRows: Array<Record<string, any>> = [];
 
 				for (const typeConst of typeIds) {
 					const vec = api.GetLineIDsWithType(modelID, typeConst);
+
+					// 3) All IFC entities: Typen ohne Vorkommen im Modell komplett überspringen
+					const vecSize = typeof vec?.size === 'function' ? vec.size() : 0;
+					if (!vecSize) continue;
+
 					forEachIdVector(vec, (id) => {
 						const line = api.GetLine(modelID, id);
 						if (!line) return;
 
 						const typeName = TYPE_NAME_BY_ID.get(line.type) ?? `IFC#${line.type}`;
 
-						// Basiszeile
 						const base: Record<string, any> = {
 							ExpressID: id,
 							Type: typeName,
 						};
-
 						if (includeCore) {
 							base['GlobalId'] = toPrimitive(line?.GlobalId);
 							base['Name'] = toPrimitive(line?.Name);
@@ -272,9 +249,8 @@ export class BimxIfcAttributeExport implements INodeType {
 							base['Tag'] = toPrimitive(line?.Tag ?? line?.Number);
 						}
 
-						// Psets & Quantities
-						const defs = relIndex.get(id) ?? [];
 						let psetCols: Record<string, any> = {};
+						const defs = relIndex.get(id) ?? [];
 						for (const def of defs) {
 							if (def?.type === IFCPROPERTYSET) {
 								psetCols = { ...psetCols, ...extractPsetProps(api as any, modelID, def) };
@@ -286,9 +262,9 @@ export class BimxIfcAttributeExport implements INodeType {
 						if (rowLayout === 'wide') {
 							wideRows.push({ ...base, ...psetCols });
 						} else {
-							// Long-Form: key-value je Paar
 							if (includeCore) {
 								for (const k of ['GlobalId', 'Name', 'Description', 'ObjectType', 'Tag']) {
+                                    // nur vorhandene Werte ausgeben
 									if (base[k] !== undefined) {
 										longRows.push({
 											ExpressID: id,
@@ -311,42 +287,38 @@ export class BimxIfcAttributeExport implements INodeType {
 					});
 				}
 
-				// -------- Ausgabe vorbereiten --------
-				const resultItem: INodeExecutionData = { json: {}, binary: {} };
+				const rows = rowLayout === 'wide' ? wideRows : longRows;
 
-				if (rowLayout === 'wide') {
-					resultItem.json = { count: wideRows.length };
+				// Ergebnis-Item
+				const result: INodeExecutionData = { json: {}, binary: {} };
+
+				// 2) JSON als „echtes“ JSON im Item (für Weiterverarbeitung),
+				//    XLSX bleibt als Binary.
+				if (wantJson) {
+					result.json = {
+						rows,
+						rowLayout,
+						scope,
+						count: rows.length,
+					};
 				} else {
-					resultItem.json = { count: longRows.length };
+					// Minimale JSON-Antwort, falls nur XLSX gewünscht
+					result.json = { count: rows.length, rowLayout, scope };
 				}
 
-				// XLSX
 				if (wantXlsx) {
-					const sheetData = rowLayout === 'wide' ? wideRows : longRows;
-					const ws = XLSX.utils.json_to_sheet(sheetData);
+					const ws = XLSX.utils.json_to_sheet(rows);
 					const wb = XLSX.utils.book_new();
 					XLSX.utils.book_append_sheet(wb, ws, 'Attributes');
 					const xbuf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as unknown as Buffer;
-
 					const xbin = await this.helpers.prepareBinaryData(Buffer.from(xbuf));
 					xbin.fileName = 'ifc_attributes.xlsx';
 					xbin.mimeType =
 						'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-					(resultItem.binary as any)['xlsx'] = xbin;
+					(result.binary as any)['xlsx'] = xbin;
 				}
 
-				// JSON (als Datei im Binary – einfacher für Weitergabe/Download)
-				if (wantJson) {
-					const jsonPayload = rowLayout === 'wide' ? wideRows : longRows;
-					const jbin = await this.helpers.prepareBinaryData(
-						Buffer.from(JSON.stringify(jsonPayload, null, 2), 'utf8'),
-					);
-					jbin.fileName = 'ifc_attributes.json';
-					jbin.mimeType = 'application/json';
-					(resultItem.binary as any)['json'] = jbin;
-				}
-
-				out.push(resultItem);
+				out.push(result);
 			} finally {
 				try {
 					api.CloseModel(modelID);
