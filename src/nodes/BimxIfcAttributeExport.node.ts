@@ -149,7 +149,7 @@ export class BimxIfcAttributeExport implements INodeType {
 				options: [
 					{ name: 'Spaces only', value: 'spaces' },
 					{ name: 'Custom IFC types', value: 'custom' },
-					{ name: 'All IFC entities', value: 'all' },
+					{ name: 'All IFC entities (only types present in the model)', value: 'all' },
 				],
 				default: 'custom',
 			},
@@ -158,7 +158,6 @@ export class BimxIfcAttributeExport implements INodeType {
 				name: 'customIfcTypes',
 				type: 'string',
 				placeholder: 'IFCSPACE,IFCDOOR,IFCWALL',
-				// -> Default mit drei Beispiel-Typen, damit das Komma-Pattern klar ist
 				default: 'IFCSPACE,IFCDOOR,IFCWALL',
 				displayOptions: { show: { entityScope: ['custom'] } },
 			},
@@ -211,9 +210,9 @@ export class BimxIfcAttributeExport implements INodeType {
 
 			try {
 				const relIndex = buildRelDefinesIndex(api as any, modelID);
-				const typeIds = getIfcTypeConstantsForScope(scope, customList);
+				const candidateTypeIds = getIfcTypeConstantsForScope(scope, customList);
 
-				if (!typeIds.length) {
+				if (!candidateTypeIds.length) {
 					throw new NodeOperationError(
 						this.getNode(),
 						'No IFC types to export (check Entity Scope / Custom IFC Types).',
@@ -221,16 +220,25 @@ export class BimxIfcAttributeExport implements INodeType {
 					);
 				}
 
+				// Präsenz-Scan: nur Typen verarbeiten, die im Modell vorkommen
+				const presentVectors: Array<{ typeConst: number; vec: any }> = [];
+				for (const typeConst of candidateTypeIds) {
+					const vec = api.GetLineIDsWithType(modelID, typeConst);
+					const size = typeof vec?.size === 'function' ? vec.size() : 0;
+					if (size > 0) presentVectors.push({ typeConst, vec });
+				}
+
+				// Wenn wirklich gar nichts vorkommt, liefern wir leeres Ergebnis
+				if (!presentVectors.length) {
+					const emptyRes: INodeExecutionData = { json: { rows: [], count: 0, rowLayout, scope } };
+					out.push(emptyRes);
+					continue;
+				}
+
 				const wideRows: Array<Record<string, any>> = [];
 				const longRows: Array<Record<string, any>> = [];
 
-				for (const typeConst of typeIds) {
-					const vec = api.GetLineIDsWithType(modelID, typeConst);
-
-					// 3) All IFC entities: Typen ohne Vorkommen im Modell komplett überspringen
-					const vecSize = typeof vec?.size === 'function' ? vec.size() : 0;
-					if (!vecSize) continue;
-
+				for (const { typeConst, vec } of presentVectors) {
 					forEachIdVector(vec, (id) => {
 						const line = api.GetLine(modelID, id);
 						if (!line) return;
@@ -264,7 +272,6 @@ export class BimxIfcAttributeExport implements INodeType {
 						} else {
 							if (includeCore) {
 								for (const k of ['GlobalId', 'Name', 'Description', 'ObjectType', 'Tag']) {
-                                    // nur vorhandene Werte ausgeben
 									if (base[k] !== undefined) {
 										longRows.push({
 											ExpressID: id,
@@ -289,11 +296,9 @@ export class BimxIfcAttributeExport implements INodeType {
 
 				const rows = rowLayout === 'wide' ? wideRows : longRows;
 
-				// Ergebnis-Item
 				const result: INodeExecutionData = { json: {}, binary: {} };
 
-				// 2) JSON als „echtes“ JSON im Item (für Weiterverarbeitung),
-				//    XLSX bleibt als Binary.
+				// JSON zur Weiterverarbeitung
 				if (wantJson) {
 					result.json = {
 						rows,
@@ -302,10 +307,10 @@ export class BimxIfcAttributeExport implements INodeType {
 						count: rows.length,
 					};
 				} else {
-					// Minimale JSON-Antwort, falls nur XLSX gewünscht
 					result.json = { count: rows.length, rowLayout, scope };
 				}
 
+				// XLSX als Binary
 				if (wantXlsx) {
 					const ws = XLSX.utils.json_to_sheet(rows);
 					const wb = XLSX.utils.book_new();
