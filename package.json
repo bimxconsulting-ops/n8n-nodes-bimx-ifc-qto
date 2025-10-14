@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "0.1.59",
+  "version": "0.1.60",
   "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
   "author": "BIM X",
   "license": "MIT",
@@ -18,7 +18,8 @@
       "dist/nodes/BimxIfcSpaceQto.node.js",
       "dist/nodes/IfcParameterExplorer.node.js",
       "dist/nodes/BimxIfcAttributeExport.node.js",
-      "dist/nodes/BimxTableFilter.node.js"
+      "dist/nodes/BimxTableFilter.node.js",
+      "dist/nodes/BimxWatch.node.js"
     ],
     "credentials": []
   },
