@@ -24,6 +24,19 @@ function forEachIdVector(vec: any, cb: (id: number) => void) {
 	}
 }
 
+function vectorSize(vec: any): number {
+	return typeof vec?.size === 'function' ? vec.size() : (Array.isArray(vec) ? vec.length : 0);
+}
+
+function getVectorFirstIds(vec: any, n = 5): number[] {
+	const sz = vectorSize(vec);
+	const out: number[] = [];
+	for (let i = 0; i < Math.min(n, sz); i++) {
+		out.push(typeof vec?.get === 'function' ? vec.get(i) : vec[i]);
+	}
+	return out;
+}
+
 function toPrimitive(val: any): any {
 	let v = val;
 	while (v && typeof v === 'object' && 'value' in v && Object.keys(v).length === 1) v = v.value;
@@ -118,6 +131,20 @@ function getIfcTypeConstantsForScope(scope: Scope, customList?: string): number[
 		.filter(([k]) => !k.startsWith('IFCREL'))
 		.map(([, v]) => v as number);
 	return filtered;
+}
+
+/**
+ * Prüft heuristisch, ob eine Entität "rooted" ist (IfcRoot-Ableitung)
+ * -> besitzt i. d. R. ein GlobalId-Feld. Das ist die generische,
+ * dateiübergreifend robuste Art, „echte Objekte“ zu erkennen.
+ */
+function isRootedEntitySample(api: any, modelID: number, typeConst: number, vec: any): boolean {
+	const firstIds = getVectorFirstIds(vec, 5);
+	for (const id of firstIds) {
+		const line = api.GetLine(modelID, id);
+		if (line && ('GlobalId' in line)) return true;
+	}
+	return false;
 }
 
 /* -------------------------------- Node ------------------------------------ */
@@ -220,15 +247,15 @@ export class BimxIfcAttributeExport implements INodeType {
 					);
 				}
 
-				// Präsenz-Scan: nur Typen verarbeiten, die im Modell vorkommen
+				// Präsenz-Scan + Rooted-Filter: nur Typen mit Instanzen UND GlobalId
 				const presentVectors: Array<{ typeConst: number; vec: any }> = [];
 				for (const typeConst of candidateTypeIds) {
 					const vec = api.GetLineIDsWithType(modelID, typeConst);
-					const size = typeof vec?.size === 'function' ? vec.size() : 0;
-					if (size > 0) presentVectors.push({ typeConst, vec });
+					if (vectorSize(vec) === 0) continue;
+					if (!isRootedEntitySample(api, modelID, typeConst, vec)) continue; // <<< Kern-Änderung
+					presentVectors.push({ typeConst, vec });
 				}
 
-				// Wenn wirklich gar nichts vorkommt, liefern wir leeres Ergebnis
 				if (!presentVectors.length) {
 					const emptyRes: INodeExecutionData = { json: { rows: [], count: 0, rowLayout, scope } };
 					out.push(emptyRes);
@@ -242,6 +269,9 @@ export class BimxIfcAttributeExport implements INodeType {
 					forEachIdVector(vec, (id) => {
 						const line = api.GetLine(modelID, id);
 						if (!line) return;
+
+						// Sicherheitshalber auch zur Laufzeit filtern (falls einzelne Ausreißer ohne GlobalId existieren)
+						if (!('GlobalId' in line)) return;
 
 						const typeName = TYPE_NAME_BY_ID.get(line.type) ?? `IFC#${line.type}`;
 
