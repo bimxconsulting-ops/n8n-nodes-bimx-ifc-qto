@@ -30,7 +30,7 @@ type ColorName = 'red' | 'yellow' | 'none';
 
 interface Rule {
   title?: string;
-  field: string;        // JSON-Path z.B. "Space.Name" oder "Pset_X.Y"
+  field: string;        // JSON-Path z.B. "Space.Name" oder "Pset_SpaceCommon.Reference"
   op: Operator;
   value?: string;
   color?: ColorName;
@@ -518,9 +518,11 @@ export class BimxRuleValidator implements INodeType {
         for (const g of rec.guids) wsGuid.addRow([rec.ruleIndex + 1, rec.ruleTitle, g]);
       });
 
-      // writeBuffer → Node-Buffer (robust gegen ArrayBuffer/Uint8Array/Buffer)
+      // writeBuffer → Node-Buffer (robust) und dann **hart** zu einem klassischen Buffer normalisieren
       const raw: unknown = await (wb.xlsx as any).writeBuffer();
-      const nodeBuf: Buffer = toNodeBuffer(raw);
+      const nodeLike = toNodeBuffer(raw);
+      const nodeBuf = Buffer.from(nodeLike); // <- erzwingt Typ `Buffer`
+
       const bin = await this.helpers.prepareBinaryData(nodeBuf);
       bin.fileName = 'validation_report.xlsx';
       bin.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -537,7 +539,8 @@ export class BimxRuleValidator implements INodeType {
     if (emitCsv) {
       for (const rec of guidsPerRule) {
         const csv = toCsv(rec.guids.map((g) => ({ rule: rec.ruleTitle, guid: g })));
-        const bin = await this.helpers.prepareBinaryData(Buffer.from(csv, 'utf8'));
+        const csvBuf = Buffer.from(csv, 'utf8'); // bereits `Buffer`
+        const bin = await this.helpers.prepareBinaryData(csvBuf);
         bin.fileName = `guids_${(rec.ruleTitle || `rule_${rec.ruleIndex + 1}`)}.csv`;
         bin.mimeType = 'text/csv';
         outBranch2.push({
