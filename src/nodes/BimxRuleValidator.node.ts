@@ -31,7 +31,7 @@ type ColorName = 'red' | 'yellow' | 'none';
 
 interface Rule {
   title?: string;
-  field: string;        // JSON-Path, z. B. "Space.Name" oder "Pset_SpaceCommon.Reference"
+  field: string;        // JSON-Path: z. B. "Space.Name" oder "Pset_SpaceCommon.Reference"
   op: Operator;
   value?: string;
   color?: ColorName;
@@ -66,7 +66,6 @@ function toNumber(v: any): number | undefined {
 }
 
 function matchRule(rule: Rule, row: Record<string, any>): boolean {
-  // optional IFC-Type-Filter
   if (rule.ifcType) {
     const allowed = rule.ifcType
       .split(',')
@@ -129,9 +128,7 @@ function matchRule(rule: Rule, row: Record<string, any>): boolean {
 
 function unionHeaders(rows: Array<Record<string, any>>): string[] {
   const set = new Set<string>();
-  for (const r of rows) {
-    for (const k of Object.keys(r)) set.add(k);
-  }
+  for (const r of rows) for (const k of Object.keys(r)) set.add(k);
   const out: string[] = [];
   set.forEach((k) => out.push(k));
   return out;
@@ -153,13 +150,25 @@ function toCsv(rows: Array<Record<string, any>>): string {
 const FILL_RED = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCDD2' } }; // light red
 const FILL_YEL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // light yellow
 
-// Robust: konvertiert ExcelJS writeBuffer() Resultate verlässlich in Node-Buffer
-function toNodeBuffer(raw: unknown): NodeBuffer {
-  if (NodeBuffer.isBuffer(raw)) return raw as NodeBuffer;
-  if (raw instanceof ArrayBuffer) return NodeBuffer.from(new Uint8Array(raw));
-  if (ArrayBuffer.isView(raw)) return NodeBuffer.from((raw as ArrayBufferView).buffer);
-  // Fallback
-  return NodeBuffer.from(String(raw ?? ''), 'binary');
+// → Normalisiert writeBuffer()-Resultat (Buffer | ArrayBuffer | Uint8Array ...) zu einem echten Node-Buffer
+function ensureNodeBuffer(raw: unknown): import('buffer').Buffer {
+  // Node-Buffer?
+  if (raw && typeof (raw as any).constructor?.isBuffer === 'function' && (raw as any).constructor.isBuffer(raw)) {
+    return raw as import('buffer').Buffer;
+  }
+  // ArrayBuffer?
+  if (raw instanceof ArrayBuffer) {
+    return NodeBuffer.from(new Uint8Array(raw));
+  }
+  // TypedArray / DataView?
+  if (ArrayBuffer.isView(raw)) {
+    const view = raw as ArrayBufferView;
+    // Achtung: der View kann Offsets haben → in frisches Uint8Array kopieren
+    const u8 = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    return NodeBuffer.from(u8);
+  }
+  // Fallback: String
+  return NodeBuffer.from(String(raw ?? ''), 'utf8');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -322,18 +331,13 @@ export class BimxRuleValidator implements INodeType {
     const rows: Array<Record<string, any>> = [];
 
     if (source === 'items') {
-      // Variante A: Vorheriger Node liefert { json: { rows: [...] } }
       if (Array.isArray(items[0]?.json?.rows)) {
         const arr = (items[0].json as any).rows as any[];
-        for (const r of arr) {
-          rows.push(typeof r === 'object' && r ? r : { value: r });
-        }
+        for (const r of arr) rows.push(typeof r === 'object' && r ? r : { value: r });
       } else {
-        // Variante B: Jedes Item = eine Zeile
         for (const it of items) rows.push({ ...(it.json || {}) });
       }
     } else {
-      // Source: Binary XLSX
       const bin = items[0]?.binary?.[binaryProperty];
       if (!bin?.data) throw new Error(`Binary property "${binaryProperty}" not found.`);
       const buf = NodeBuffer.from(bin.data as string, 'base64');
@@ -395,7 +399,7 @@ export class BimxRuleValidator implements INodeType {
             if (guid) guidsPerRule[ruleIndex].guids.push(guid);
           }
         } catch {
-          // einzelne Zeile ignorieren
+          /* ignore single row errors */
         }
       });
     });
@@ -442,7 +446,6 @@ export class BimxRuleValidator implements INodeType {
         };
       });
 
-      // Lookup: rowIndex -> {fields, titles}
       const byRow = new Map<number, { fields: Map<string, ColorName>; titles: string[] }>();
       for (const h of hits) {
         const field = rules[h.ruleIndex]?.field ?? '';
@@ -520,10 +523,9 @@ export class BimxRuleValidator implements INodeType {
         for (const g of rec.guids) wsGuid.addRow([rec.ruleIndex + 1, rec.ruleTitle, g]);
       });
 
-      // writeBuffer → Node-Buffer normalisieren
-      const raw: unknown = await (wb.xlsx as any).writeBuffer(); // ArrayBuffer/Uint8Array abhängig von Umgebung
-      const nodeLike: NodeBuffer = toNodeBuffer(raw);
-      const nodeBuf: NodeBuffer = NodeBuffer.from(nodeLike); // garantiert NodeBuffer
+      // ← WICHTIG: writeBuffer() → unknown → echter Node-Buffer
+      const raw: unknown = await (wb.xlsx as any).writeBuffer();
+      const nodeBuf = ensureNodeBuffer(raw);
 
       const bin = await this.helpers.prepareBinaryData(nodeBuf);
       bin.fileName = 'validation_report.xlsx';
@@ -541,7 +543,7 @@ export class BimxRuleValidator implements INodeType {
     if (emitCsv) {
       for (const rec of guidsPerRule) {
         const csv = toCsv(rec.guids.map((g) => ({ rule: rec.ruleTitle, guid: g })));
-        const csvBuf: NodeBuffer = NodeBuffer.from(csv, 'utf8');
+        const csvBuf = NodeBuffer.from(csv, 'utf8');
         const bin = await this.helpers.prepareBinaryData(csvBuf);
         bin.fileName = `guids_${(rec.ruleTitle || `rule_${rec.ruleIndex + 1}`)}.csv`;
         bin.mimeType = 'text/csv';
