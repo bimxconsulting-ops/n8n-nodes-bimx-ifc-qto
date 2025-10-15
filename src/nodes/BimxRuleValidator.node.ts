@@ -6,11 +6,8 @@ import type {
   INodeTypeDescription,
 } from 'n8n-workflow';
 import ExcelJS from 'exceljs';
-import { Buffer as NodeBuffer } from 'buffer';
 
-/* -------------------------------------------------------------------------- */
-/* Typen                                                                      */
-/* -------------------------------------------------------------------------- */
+/* ---------------------------------- Typen --------------------------------- */
 
 type Operator =
   | 'is'
@@ -23,19 +20,17 @@ type Operator =
   | 'lt'
   | 'lte'
   | 'gt'
-  | 'gte'
-  | 'eq'
-  | 'neq';
+  | 'gte';
 
 type ColorName = 'red' | 'yellow' | 'none';
 
 interface Rule {
   title?: string;
-  field: string;        // JSON-Path: z. B. "Space.Name" oder "Pset_SpaceCommon.Reference"
+  field: string;        // z.B. "Space.Name" oder "Qto.NetFloorArea"
   op: Operator;
   value?: string;
-  color?: ColorName;
-  ifcType?: string;     // "IFCSPACE,IFCDOOR"
+  color?: ColorName;    // rote/gelbe Markierung
+  ifcType?: string;     // optional: CSV, z.B. "IFCSPACE,IFCDOOR"
 }
 
 interface RuleHit {
@@ -45,148 +40,115 @@ interface RuleHit {
   guid?: string;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
+/* --------------------------------- Helper --------------------------------- */
 
 function getByPath(obj: any, path: string): any {
   if (!obj || !path) return undefined;
-  const parts = path.split('.');
   let cur = obj;
-  for (const p of parts) {
+  for (const part of path.split('.')) {
     if (cur == null) return undefined;
-    cur = cur[p];
+    cur = cur[part];
   }
   return cur;
 }
 
-function toNumber(v: any): number | undefined {
+function toNum(v: any): number | undefined {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
 
-function matchRule(rule: Rule, row: Record<string, any>): boolean {
+function unionHeaders(rows: Array<Record<string, any>>): string[] {
+  const set = new Set<string>();
+  for (const r of rows) Object.keys(r).forEach(k => set.add(k));
+  return Array.from(set.values());
+}
+
+function toCsv(rows: Array<Record<string, any>>): string {
+  if (!rows.length) return '';
+  const headers = unionHeaders(rows);
+  const esc = (x: any) => {
+    const s = x == null ? '' : String(x);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [
+    headers.join(','),
+    ...rows.map(r => headers.map(h => esc(r[h])).join(',')),
+  ].join('\n');
+}
+
+function matches(rule: Rule, row: Record<string, any>): boolean {
+  // IFC-Type Filter (optional)
   if (rule.ifcType) {
-    const allowed = rule.ifcType
-      .split(',')
-      .map((s) => s.trim().toUpperCase())
-      .filter(Boolean);
-    const typeCand =
-      (row['IFCType'] ?? row['type'] ?? row['ObjectType'] ?? row['Type']) ?? '';
-    const got = String(typeCand).toUpperCase();
-    if (allowed.length > 0 && !allowed.includes(got)) return false;
+    const allow = rule.ifcType.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    const t = String(row['IFCType'] ?? row['type'] ?? row['ObjectType'] ?? row['Type'] ?? '').toUpperCase();
+    if (allow.length && !allow.includes(t)) return false;
   }
 
   const raw = getByPath(row, rule.field);
   const val = raw == null ? '' : String(raw);
 
   switch (rule.op) {
-    case 'is':
-    case 'eq':
-      return val === (rule.value ?? '');
-    case 'isNot':
-    case 'neq':
-      return val !== (rule.value ?? '');
-    case 'contains':
-      return val.includes(rule.value ?? '');
-    case 'notContains':
-      return !val.includes(rule.value ?? '');
-    case 'regex': {
-      try {
-        const rx = new RegExp(rule.value ?? '', 'i');
-        return rx.test(val);
-      } catch {
-        return false;
-      }
-    }
-    case 'empty':
-      return val === '' || val === 'null' || val === 'undefined';
-    case 'notEmpty':
-      return !(val === '' || val === 'null' || val === 'undefined');
+    case 'is':        return val === (rule.value ?? '');
+    case 'isNot':     return val !== (rule.value ?? '');
+    case 'contains':  return val.includes(rule.value ?? '');
+    case 'notContains': return !val.includes(rule.value ?? '');
+    case 'regex':
+      try { return new RegExp(rule.value ?? '', 'i').test(val); } catch { return false; }
+    case 'empty':     return val === '' || val === 'null' || val === 'undefined';
+    case 'notEmpty':  return !(val === '' || val === 'null' || val === 'undefined');
     case 'lt': {
-      const a = toNumber(val);
-      const b = toNumber(rule.value);
+      const a = toNum(val), b = toNum(rule.value);
       return a != null && b != null && a < b;
     }
     case 'lte': {
-      const a = toNumber(val);
-      const b = toNumber(rule.value);
+      const a = toNum(val), b = toNum(rule.value);
       return a != null && b != null && a <= b;
     }
     case 'gt': {
-      const a = toNumber(val);
-      const b = toNumber(rule.value);
+      const a = toNum(val), b = toNum(rule.value);
       return a != null && b != null && a > b;
     }
     case 'gte': {
-      const a = toNumber(val);
-      const b = toNumber(rule.value);
+      const a = toNum(val), b = toNum(rule.value);
       return a != null && b != null && a >= b;
     }
   }
 }
 
-function unionHeaders(rows: Array<Record<string, any>>): string[] {
-  const set = new Set<string>();
-  for (const r of rows) for (const k of Object.keys(r)) set.add(k);
-  const out: string[] = [];
-  set.forEach((k) => out.push(k));
-  return out;
-}
-
-function toCsv(rows: Array<Record<string, any>>): string {
-  if (!rows.length) return '';
-  const headers = unionHeaders(rows);
-  const esc = (v: any) => {
-    const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const lines: string[] = [];
-  lines.push(headers.join(','));
-  for (const r of rows) lines.push(headers.map((h) => esc(r[h])).join(','));
-  return lines.join('\n');
-}
-
-const FILL_RED = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCDD2' } }; // light red
-const FILL_YEL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // light yellow
-
-// → Normalisiert writeBuffer()-Resultat (Buffer | ArrayBuffer | Uint8Array ...) zu einem echten Node-Buffer
-function ensureNodeBuffer(raw: unknown): import('buffer').Buffer {
-  // Node-Buffer?
+/** ExcelJS → echter Node-Buffer, unabhängig vom deklarierten Type */
+function toNodeBuffer(raw: unknown): Buffer {
   if (raw && typeof (raw as any).constructor?.isBuffer === 'function' && (raw as any).constructor.isBuffer(raw)) {
-    return raw as import('buffer').Buffer;
+    // bereits Node-Buffer
+    return raw as Buffer;
   }
-  // ArrayBuffer?
   if (raw instanceof ArrayBuffer) {
-    return NodeBuffer.from(new Uint8Array(raw));
+    return Buffer.from(new Uint8Array(raw));
   }
-  // TypedArray / DataView?
   if (ArrayBuffer.isView(raw)) {
-    const view = raw as ArrayBufferView;
-    // Achtung: der View kann Offsets haben → in frisches Uint8Array kopieren
-    const u8 = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-    return NodeBuffer.from(u8);
+    const v = raw as ArrayBufferView;
+    return Buffer.from(v.buffer, v.byteOffset, v.byteLength);
   }
-  // Fallback: String
-  return NodeBuffer.from(String(raw ?? ''), 'utf8');
+  return Buffer.from(String(raw ?? ''), 'utf8');
 }
 
-/* -------------------------------------------------------------------------- */
-/* Node                                                                        */
-/* -------------------------------------------------------------------------- */
+/* --------------------------------- Styles --------------------------------- */
+
+const FILL_RED = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCDD2' } }; // hellrot
+const FILL_YEL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // hellgelb
+
+/* ---------------------------------- Node ---------------------------------- */
 
 export class BimxRuleValidator implements INodeType {
   description: INodeTypeDescription = {
-    displayName: 'BIM X – Rule Validator',
+    displayName: 'BIM X - Rule Validator',
     name: 'bimxRuleValidator',
     icon: 'file:BIMX.svg',
     group: ['transform'],
     version: 1,
-    description:
-      'Validate table rows (JSON/XLSX) against multiple rules and generate a highlighted XLSX report + GUID lists.',
-    defaults: { name: 'BIM X – Rule Validator' },
+    description: 'Validiert Tabellenzeilen (JSON/XLSX) mit Regeln und erzeugt XLSX-Report (Markierungen) + GUID-Listen.',
+    defaults: { name: 'BIM X - Rule Validator' },
     inputs: ['main'],
-    outputs: ['main', 'main'], // 0: report/meta; 1: GUID lists per rule
+    outputs: ['main', 'main'], // 0: Report/Meta, 1: GUID-Listen/CSV
     properties: [
       {
         displayName: 'Source',
@@ -203,7 +165,7 @@ export class BimxRuleValidator implements INodeType {
         name: 'binaryProperty',
         type: 'string',
         default: 'xlsx',
-        description: 'When Source = Binary XLSX, read from this binary property.',
+        description: 'Nur wenn Source = Binary XLSX',
         displayOptions: { show: { source: ['binary'] } },
       },
 
@@ -219,13 +181,7 @@ export class BimxRuleValidator implements INodeType {
             displayName: 'Rule',
             values: [
               { displayName: 'Title', name: 'title', type: 'string', default: '' },
-              {
-                displayName: 'Field (JSON path)',
-                name: 'field',
-                type: 'string',
-                default: '',
-                placeholder: 'e.g. Space.Name or Pset_SpaceCommon.Reference',
-              },
+              { displayName: 'Field (JSON path)', name: 'field', type: 'string', default: '' },
               {
                 displayName: 'Operator',
                 name: 'op',
@@ -243,23 +199,15 @@ export class BimxRuleValidator implements INodeType {
                   { name: 'Less or Equal', value: 'lte' },
                   { name: 'Greater Than', value: 'gt' },
                   { name: 'Greater or Equal', value: 'gte' },
-                  { name: 'Equal (number)', value: 'eq' },
-                  { name: 'Not Equal (number)', value: 'neq' },
                 ],
               },
+              { displayName: 'Value / Pattern', name: 'value', type: 'string', default: '' },
               {
-                displayName: 'Value / Pattern',
-                name: 'value',
-                type: 'string',
-                default: '',
-              },
-              {
-                displayName: 'IFC Type filter (optional)',
+                displayName: 'IFC Type filter (CSV)',
                 name: 'ifcType',
                 type: 'string',
                 default: '',
-                description:
-                  'Comma-separated list (e.g. IFCSPACE,IFCDOOR). Leave empty for all.',
+                description: 'z.B. IFCSPACE,IFCDOOR – leer lassen für alle',
               },
               {
                 displayName: 'Highlight Color',
@@ -277,36 +225,11 @@ export class BimxRuleValidator implements INodeType {
         ],
       },
 
-      {
-        displayName: 'GUID Field',
-        name: 'guidField',
-        type: 'string',
-        default: 'GlobalId',
-      },
-      {
-        displayName: 'Report Title',
-        name: 'reportTitle',
-        type: 'string',
-        default: 'Validation Report',
-      },
-      {
-        displayName: 'Generate XLSX Report',
-        name: 'emitXlsx',
-        type: 'boolean',
-        default: true,
-      },
-      {
-        displayName: 'Generate JSON (meta & hits)',
-        name: 'emitJson',
-        type: 'boolean',
-        default: true,
-      },
-      {
-        displayName: 'Generate CSV (GUIDs per rule)',
-        name: 'emitCsv',
-        type: 'boolean',
-        default: false,
-      },
+      { displayName: 'GUID Field', name: 'guidField', type: 'string', default: 'GlobalId' },
+      { displayName: 'Report Title', name: 'reportTitle', type: 'string', default: 'Validation Report' },
+      { displayName: 'Generate XLSX Report', name: 'emitXlsx', type: 'boolean', default: true },
+      { displayName: 'Generate JSON Meta', name: 'emitJson', type: 'boolean', default: true },
+      { displayName: 'Generate CSV (per Rule GUIDs)', name: 'emitCsv', type: 'boolean', default: false },
     ],
   };
 
@@ -316,9 +239,7 @@ export class BimxRuleValidator implements INodeType {
     const source = this.getNodeParameter('source', 0) as 'items' | 'binary';
     const binaryProperty = this.getNodeParameter('binaryProperty', 0, 'xlsx') as string;
 
-    const rulesColl = this.getNodeParameter('rules', 0, {}) as {
-      rule?: Rule[];
-    };
+    const rulesColl = this.getNodeParameter('rules', 0, {}) as { rule?: Rule[] };
     const rules: Rule[] = Array.isArray(rulesColl?.rule) ? rulesColl.rule : [];
 
     const guidField = this.getNodeParameter('guidField', 0) as string;
@@ -327,185 +248,145 @@ export class BimxRuleValidator implements INodeType {
     const emitJson = this.getNodeParameter('emitJson', 0) as boolean;
     const emitCsv = this.getNodeParameter('emitCsv', 0) as boolean;
 
-    /* ------------------------------- Daten laden --------------------------- */
+    /* --------------------------- Datenbeschaffung -------------------------- */
     const rows: Array<Record<string, any>> = [];
 
     if (source === 'items') {
+      // Entweder items[0].json.rows[] (Tabellenblock) ODER je Item eine Zeile
       if (Array.isArray(items[0]?.json?.rows)) {
-        const arr = (items[0].json as any).rows as any[];
-        for (const r of arr) rows.push(typeof r === 'object' && r ? r : { value: r });
+        for (const r of (items[0]!.json as any).rows) rows.push(typeof r === 'object' ? r : { value: r });
       } else {
         for (const it of items) rows.push({ ...(it.json || {}) });
       }
     } else {
       const bin = items[0]?.binary?.[binaryProperty];
       if (!bin?.data) throw new Error(`Binary property "${binaryProperty}" not found.`);
-      const buf = NodeBuffer.from(bin.data as string, 'base64');
+      const buf = Buffer.from(bin.data as string, 'base64');
 
       const wbIn = new ExcelJS.Workbook();
       await wbIn.xlsx.load(buf);
       const wsIn = wbIn.worksheets[0];
       if (!wsIn) throw new Error('No worksheet in XLSX.');
 
+      // Header in Zeile 1
       const headers: string[] = [];
-      const headerRow = wsIn.getRow(1);
-      headerRow.eachCell((cell, col) => {
+      wsIn.getRow(1).eachCell((cell, col) => {
         headers[col - 1] = String(cell.value ?? `col_${col}`);
       });
-
       for (let r = 2; r <= wsIn.rowCount; r++) {
         const obj: Record<string, any> = {};
         for (let c = 1; c <= headers.length; c++) {
           const v: any = wsIn.getCell(r, c).value;
           obj[headers[c - 1]] =
-            v && typeof v === 'object' && 'result' in (v as any)
-              ? (v as any).result
-              : v;
+            v && typeof v === 'object' && 'result' in (v as any) ? (v as any).result : v;
         }
         rows.push(obj);
       }
     }
 
-    /* ---------------------------- Regeln auswerten ------------------------- */
+    /* ------------------------------ Auswertung ----------------------------- */
     const hits: RuleHit[] = [];
-    const guidsPerRule: Array<{
-      ruleIndex: number;
-      ruleTitle: string;
-      count: number;
-      guids: string[];
-    }> = [];
-
-    for (let i = 0; i < rules.length; i++) {
-      guidsPerRule.push({
-        ruleIndex: i,
-        ruleTitle: rules[i].title || `Rule ${i + 1}`,
-        count: 0,
-        guids: [],
-      });
-    }
+    const perRule = rules.map((r, i) => ({ index: i, title: r.title || `Rule ${i + 1}`, count: 0, guids: [] as string[] }));
 
     rows.forEach((row, rowIndex) => {
       rules.forEach((rule, ruleIndex) => {
         try {
-          if (matchRule(rule, row)) {
+          if (matches(rule, row)) {
             const guid = String(row[guidField] ?? row['GUID'] ?? '');
-            hits.push({
-              ruleIndex,
-              ruleTitle: rule.title || `Rule ${ruleIndex + 1}`,
-              rowIndex,
-              guid,
-            });
-            guidsPerRule[ruleIndex].count++;
-            if (guid) guidsPerRule[ruleIndex].guids.push(guid);
+            hits.push({ ruleIndex, ruleTitle: perRule[ruleIndex].title, rowIndex, guid });
+            perRule[ruleIndex].count++;
+            if (guid) perRule[ruleIndex].guids.push(guid);
           }
-        } catch {
-          /* ignore single row errors */
-        }
+        } catch {/* row-spezifische Fehler ignorieren */}
       });
     });
 
-    /* ----------------------------- Outputs bauen -------------------------- */
+    /* -------------------------------- Output ------------------------------- */
     const outMain: INodeExecutionData[] = [];
-    const outBranch2: INodeExecutionData[] = [];
+    const outGuid: INodeExecutionData[] = [];
 
-    const metaJson: any = {
+    const meta = {
       title: reportTitle,
       totalRows: rows.length,
       totalRules: rules.length,
-      hits: hits.length,
-      perRule: guidsPerRule.map((g) => ({
-        index: g.ruleIndex,
-        title: g.ruleTitle,
-        count: g.count,
-        guids: g.guids,
-      })),
+      totalHits: hits.length,
+      perRule,
     };
 
+    // A) XLSX Report mit Markierung
     if (emitXlsx) {
       const wb = new ExcelJS.Workbook();
-      wb.creator = 'BIM X – Rule Validator';
+      wb.creator = 'BIM X - Rule Validator';
       wb.created = new Date();
 
-      // Data
       const ws = wb.addWorksheet('Data');
       (ws as any).views = [{ state: 'frozen', ySplit: 1 }];
 
       const headers = unionHeaders(rows);
       ws.columns = [
-        ...headers.map((h) => ({ header: h, key: h })),
+        ...headers.map(h => ({ header: h, key: h })),
         { header: 'Violations', key: '__violations__' },
       ] as any;
 
-      const headerRow = ws.getRow(1);
-      headerRow.eachCell((cell) => {
+      // Header fett + leicht gefärbt
+      ws.getRow(1).eachCell(cell => {
         (cell as any).font = { bold: true };
-        (cell as any).fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: 'FFE3F2FD' },
-        };
+        (cell as any).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE3F2FD' } };
       });
 
-      const byRow = new Map<number, { fields: Map<string, ColorName>; titles: string[] }>();
+      // Map row → markierte Felder + Titel
+      const byRow = new Map<number, { fieldToColor: Map<string, ColorName>; titles: string[] }>();
       for (const h of hits) {
-        const field = rules[h.ruleIndex]?.field ?? '';
         const col = rules[h.ruleIndex]?.color ?? 'red';
-        if (!byRow.has(h.rowIndex)) byRow.set(h.rowIndex, { fields: new Map(), titles: [] });
+        const fld = rules[h.ruleIndex]?.field ?? '';
+        if (!byRow.has(h.rowIndex)) byRow.set(h.rowIndex, { fieldToColor: new Map(), titles: [] });
         const rec = byRow.get(h.rowIndex)!;
-        rec.fields.set(field, col);
+        rec.fieldToColor.set(fld, col);
         rec.titles.push(h.ruleTitle);
       }
 
       rows.forEach((r, i) => {
         const vio = byRow.get(i)?.titles.join(' | ') ?? '';
         const row = ws.addRow({ ...(r as any), __violations__: vio });
+
         const rec = byRow.get(i);
         if (rec) {
-          headers.forEach((h) => {
-            if (rec.fields.has(h)) {
-              const col = rec.fields.get(h);
-              const cell = row.getCell(h) as any; // key access
-              if (col === 'red') cell.fill = FILL_RED as any;
-              else if (col === 'yellow') cell.fill = FILL_YEL as any;
+          for (const [field, color] of rec.fieldToColor.entries()) {
+            if (!field) continue;
+            // Feldname kann ein JSON-Pfad sein; markiere die Spalte mit exakt diesem Key, falls vorhanden
+            if (headers.includes(field)) {
+              const cell = row.getCell(field) as any;
+              if (color === 'red') cell.fill = FILL_RED as any;
+              if (color === 'yellow') cell.fill = FILL_YEL as any;
             }
-          });
+          }
         }
       });
 
-      // Spaltenbreiten
-      const maxLen: Record<string, number> = {};
-      const allKeys = [...headers, '__violations__'];
-      for (const k of allKeys) {
-        const displayHeader = k === '__violations__' ? 'Violations' : k;
-        maxLen[k] = Math.max(10, displayHeader.length);
-      }
+      // etwas brauchbare Spaltenbreite
+      const widths: Record<string, number> = {};
+      for (const k of [...headers, '__violations__']) widths[k] = Math.max(10, k.length + 2);
       rows.forEach((r, i) => {
         for (const h of headers) {
-          const v = r[h];
-          const s = v == null ? '' : String(v);
-          maxLen[h] = Math.min(Math.max(maxLen[h], s.length), 60);
+          const s = r[h] == null ? '' : String(r[h]);
+          widths[h] = Math.min(Math.max(widths[h], s.length + 2), 60);
         }
         const vio = byRow.get(i)?.titles.join(' | ') ?? '';
-        maxLen['__violations__'] = Math.min(Math.max(maxLen['__violations__'], vio.length), 80);
+        widths['__violations__'] = Math.min(Math.max(widths['__violations__'], vio.length + 2), 80);
       });
-      (ws.columns || []).forEach((c: any) => {
-        const key = c.key as string;
-        const ml = maxLen[key] ?? 12;
-        c.width = Math.max(ml + 2, 10);
-      });
+      (ws.columns || []).forEach((c: any) => (c.width = widths[c.key as string] ?? 12));
 
-      // Summary
+      // Summary-Sheet
       const wsSum = wb.addWorksheet('Summary');
-      const titleRow = wsSum.addRow([reportTitle]);
-      titleRow.getCell(1).font = { size: 14, bold: true };
+      wsSum.addRow([reportTitle]).getCell(1).font = { bold: true, size: 14 };
       wsSum.addRow([]);
-      const hdr = wsSum.addRow(['#', 'Rule Title', 'Field', 'Operator', 'Value/Pattern', 'IFC Filter', 'Color', 'Hits']);
-      hdr.eachCell((cell) => ((cell as any).font = { bold: true }));
+      const hdr = wsSum.addRow(['#', 'Rule Title', 'Field', 'Operator', 'Value', 'IFC Filter', 'Color', 'Hits']);
+      hdr.eachCell(c => ((c as any).font = { bold: true }));
       rules.forEach((r, idx) => {
-        const rec = guidsPerRule[idx];
+        const rec = perRule[idx];
         wsSum.addRow([
           idx + 1,
-          r.title || `Rule ${idx + 1}`,
+          rec.title,
           r.field,
           r.op,
           r.value ?? '',
@@ -515,45 +396,37 @@ export class BimxRuleValidator implements INodeType {
         ]);
       });
 
-      // GUIDs
-      const wsGuid = wb.addWorksheet('GUIDs');
-      const gHdr = wsGuid.addRow(['Rule #', 'Rule Title', 'GUID']);
-      gHdr.eachCell((cell) => ((cell as any).font = { bold: true }));
-      guidsPerRule.forEach((rec) => {
-        for (const g of rec.guids) wsGuid.addRow([rec.ruleIndex + 1, rec.ruleTitle, g]);
-      });
+      // GUIDs-Sheet
+      const wsGuids = wb.addWorksheet('GUIDs');
+      const gh = wsGuids.addRow(['Rule #', 'Rule Title', 'GUID']);
+      gh.eachCell(c => ((c as any).font = { bold: true }));
+      perRule.forEach(rec => rec.guids.forEach(g => wsGuids.addRow([rec.index + 1, rec.title, g])));
 
-      // ← WICHTIG: writeBuffer() → unknown → echter Node-Buffer
-      const raw: unknown = await (wb.xlsx as any).writeBuffer();
-      const nodeBuf = ensureNodeBuffer(raw);
-
-      const bin = await this.helpers.prepareBinaryData(nodeBuf);
+      // >>> hier die sensible Stelle: Buffer-Konvertierung
+      const raw = await (wb.xlsx as any).writeBuffer();   // kann ArrayBuffer/Uint8Array/Buffer sein
+      const nodeBuf = toNodeBuffer(raw);                  // garantiert Node-Buffer
+      const bin = await this.helpers.prepareBinaryData(nodeBuf as any);
       bin.fileName = 'validation_report.xlsx';
       bin.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-      outMain.push({ json: metaJson, binary: { report: bin } });
+      outMain.push({ json: meta, binary: { report: bin } });
     } else if (emitJson) {
-      outMain.push({ json: metaJson });
+      outMain.push({ json: meta });
     }
 
-    if (emitJson) {
-      outBranch2.push({ json: { perRule: metaJson.perRule } });
-    }
-
+    // B) Zweig 2: GUID-Listen (JSON) + optional CSV je Regel
+    outGuid.push({ json: { perRule } });
     if (emitCsv) {
-      for (const rec of guidsPerRule) {
-        const csv = toCsv(rec.guids.map((g) => ({ rule: rec.ruleTitle, guid: g })));
-        const csvBuf = NodeBuffer.from(csv, 'utf8');
-        const bin = await this.helpers.prepareBinaryData(csvBuf);
-        bin.fileName = `guids_${(rec.ruleTitle || `rule_${rec.ruleIndex + 1}`)}.csv`;
+      for (const rec of perRule) {
+        const csv = toCsv(rec.guids.map(g => ({ rule: rec.title, guid: g })));
+        const csvBuf = Buffer.from(csv, 'utf8');
+        const bin = await this.helpers.prepareBinaryData(csvBuf as any);
+        bin.fileName = `guids_${(rec.title || `rule_${rec.index + 1}`)}.csv`;
         bin.mimeType = 'text/csv';
-        outBranch2.push({
-          json: { rule: rec.ruleTitle, count: rec.count },
-          binary: { csv: bin },
-        });
+        outGuid.push({ json: { rule: rec.title, count: rec.count }, binary: { csv: bin } });
       }
     }
 
-    return [outMain, outBranch2];
+    return [outMain, outGuid];
   }
 }
