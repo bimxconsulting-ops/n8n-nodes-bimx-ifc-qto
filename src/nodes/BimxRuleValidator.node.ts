@@ -5,7 +5,7 @@ import type {
   INodeType,
   INodeTypeDescription,
 } from 'n8n-workflow';
-import ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 
 /* ---------------------------------- Typen --------------------------------- */
 
@@ -29,7 +29,7 @@ interface Rule {
   field: string;        // z.B. "Space.Name" oder "Qto.NetFloorArea"
   op: Operator;
   value?: string;
-  color?: ColorName;    // rote/gelbe Markierung
+  color?: ColorName;    // (v1 ignoriert – nur für spätere ExcelJS-Highlights)
   ifcType?: string;     // optional: CSV, z.B. "IFCSPACE,IFCDOOR"
 }
 
@@ -115,27 +115,6 @@ function matches(rule: Rule, row: Record<string, any>): boolean {
   }
 }
 
-/** ExcelJS → echter Node-Buffer, unabhängig vom deklarierten Type */
-function toNodeBuffer(raw: unknown): Buffer {
-  if (raw && typeof (raw as any).constructor?.isBuffer === 'function' && (raw as any).constructor.isBuffer(raw)) {
-    // bereits Node-Buffer
-    return raw as Buffer;
-  }
-  if (raw instanceof ArrayBuffer) {
-    return Buffer.from(new Uint8Array(raw));
-  }
-  if (ArrayBuffer.isView(raw)) {
-    const v = raw as ArrayBufferView;
-    return Buffer.from(v.buffer, v.byteOffset, v.byteLength);
-  }
-  return Buffer.from(String(raw ?? ''), 'utf8');
-}
-
-/* --------------------------------- Styles --------------------------------- */
-
-const FILL_RED = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCDD2' } }; // hellrot
-const FILL_YEL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // hellgelb
-
 /* ---------------------------------- Node ---------------------------------- */
 
 export class BimxRuleValidator implements INodeType {
@@ -145,7 +124,7 @@ export class BimxRuleValidator implements INodeType {
     icon: 'file:BIMX.svg',
     group: ['transform'],
     version: 1,
-    description: 'Validiert Tabellenzeilen (JSON/XLSX) mit Regeln und erzeugt XLSX-Report (Markierungen) + GUID-Listen.',
+    description: 'Validiert Tabellen (JSON/XLSX) mit Regeln und erzeugt XLSX-Report (tabellarisch) + GUID-Listen.',
     defaults: { name: 'BIM X - Rule Validator' },
     inputs: ['main'],
     outputs: ['main', 'main'], // 0: Report/Meta, 1: GUID-Listen/CSV
@@ -263,25 +242,12 @@ export class BimxRuleValidator implements INodeType {
       if (!bin?.data) throw new Error(`Binary property "${binaryProperty}" not found.`);
       const buf = Buffer.from(bin.data as string, 'base64');
 
-      const wbIn = new ExcelJS.Workbook();
-      await wbIn.xlsx.load(buf);
-      const wsIn = wbIn.worksheets[0];
-      if (!wsIn) throw new Error('No worksheet in XLSX.');
-
-      // Header in Zeile 1
-      const headers: string[] = [];
-      wsIn.getRow(1).eachCell((cell, col) => {
-        headers[col - 1] = String(cell.value ?? `col_${col}`);
-      });
-      for (let r = 2; r <= wsIn.rowCount; r++) {
-        const obj: Record<string, any> = {};
-        for (let c = 1; c <= headers.length; c++) {
-          const v: any = wsIn.getCell(r, c).value;
-          obj[headers[c - 1]] =
-            v && typeof v === 'object' && 'result' in (v as any) ? (v as any).result : v;
-        }
-        rows.push(obj);
-      }
+      const wbIn = XLSX.read(buf, { type: 'buffer' });
+      const sheetName = wbIn.SheetNames[0];
+      const ws = wbIn.Sheets[sheetName];
+      if (!ws) throw new Error('No worksheet in XLSX.');
+      const arr = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: '' });
+      rows.push(...arr);
     }
 
     /* ------------------------------ Auswertung ----------------------------- */
@@ -313,99 +279,44 @@ export class BimxRuleValidator implements INodeType {
       perRule,
     };
 
-    // A) XLSX Report mit Markierung
+    // A) XLSX Report (ohne Formatierung; tabellarisch, + Violations-Spalte)
     if (emitXlsx) {
-      const wb = new ExcelJS.Workbook();
-      wb.creator = 'BIM X - Rule Validator';
-      wb.created = new Date();
-
-      const ws = wb.addWorksheet('Data');
-      (ws as any).views = [{ state: 'frozen', ySplit: 1 }];
-
       const headers = unionHeaders(rows);
-      ws.columns = [
-        ...headers.map(h => ({ header: h, key: h })),
-        { header: 'Violations', key: '__violations__' },
-      ] as any;
-
-      // Header fett + leicht gefärbt
-      ws.getRow(1).eachCell(cell => {
-        (cell as any).font = { bold: true };
-        (cell as any).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE3F2FD' } };
+      const dataWithViolations = rows.map((r, i) => {
+        const titles = hits.filter(h => h.rowIndex === i).map(h => h.ruleTitle);
+        return { ...r, Violations: titles.join(' | ') };
       });
 
-      // Map row → markierte Felder + Titel
-      const byRow = new Map<number, { fieldToColor: Map<string, ColorName>; titles: string[] }>();
-      for (const h of hits) {
-        const col = rules[h.ruleIndex]?.color ?? 'red';
-        const fld = rules[h.ruleIndex]?.field ?? '';
-        if (!byRow.has(h.rowIndex)) byRow.set(h.rowIndex, { fieldToColor: new Map(), titles: [] });
-        const rec = byRow.get(h.rowIndex)!;
-        rec.fieldToColor.set(fld, col);
-        rec.titles.push(h.ruleTitle);
+      const wb = XLSX.utils.book_new();
+      const wsData = [headers.concat('Violations')];
+      for (const row of dataWithViolations) {
+        wsData.push(headers.map(h => row[h] ?? '').concat(row['Violations'] ?? ''));
       }
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      XLSX.utils.book_append_sheet(wb, ws, 'Data');
 
-      rows.forEach((r, i) => {
-        const vio = byRow.get(i)?.titles.join(' | ') ?? '';
-        const row = ws.addRow({ ...(r as any), __violations__: vio });
+      // Summary
+      const sumHeaders = ['#', 'Rule Title', 'Field', 'Operator', 'Value', 'IFC Filter', 'Color', 'Hits'];
+      const sumRows = rules.map((r, idx) => [
+        idx + 1,
+        perRule[idx].title,
+        r.field,
+        r.op,
+        r.value ?? '',
+        r.ifcType ?? '',
+        r.color ?? 'red',
+        perRule[idx].count,
+      ]);
+      const wsSum = XLSX.utils.aoa_to_sheet([sumHeaders, ...sumRows]);
+      XLSX.utils.book_append_sheet(wb, wsSum, 'Summary');
 
-        const rec = byRow.get(i);
-        if (rec) {
-          for (const [field, color] of rec.fieldToColor.entries()) {
-            if (!field) continue;
-            // Feldname kann ein JSON-Pfad sein; markiere die Spalte mit exakt diesem Key, falls vorhanden
-            if (headers.includes(field)) {
-              const cell = row.getCell(field) as any;
-              if (color === 'red') cell.fill = FILL_RED as any;
-              if (color === 'yellow') cell.fill = FILL_YEL as any;
-            }
-          }
-        }
-      });
+      // GUIDs
+      const guidRows = perRule.flatMap(rec => rec.guids.map(g => [rec.index + 1, rec.title, g]));
+      const wsGuids = XLSX.utils.aoa_to_sheet([['Rule #', 'Rule Title', 'GUID'], ...guidRows]);
+      XLSX.utils.book_append_sheet(wb, wsGuids, 'GUIDs');
 
-      // etwas brauchbare Spaltenbreite
-      const widths: Record<string, number> = {};
-      for (const k of [...headers, '__violations__']) widths[k] = Math.max(10, k.length + 2);
-      rows.forEach((r, i) => {
-        for (const h of headers) {
-          const s = r[h] == null ? '' : String(r[h]);
-          widths[h] = Math.min(Math.max(widths[h], s.length + 2), 60);
-        }
-        const vio = byRow.get(i)?.titles.join(' | ') ?? '';
-        widths['__violations__'] = Math.min(Math.max(widths['__violations__'], vio.length + 2), 80);
-      });
-      (ws.columns || []).forEach((c: any) => (c.width = widths[c.key as string] ?? 12));
-
-      // Summary-Sheet
-      const wsSum = wb.addWorksheet('Summary');
-      wsSum.addRow([reportTitle]).getCell(1).font = { bold: true, size: 14 };
-      wsSum.addRow([]);
-      const hdr = wsSum.addRow(['#', 'Rule Title', 'Field', 'Operator', 'Value', 'IFC Filter', 'Color', 'Hits']);
-      hdr.eachCell(c => ((c as any).font = { bold: true }));
-      rules.forEach((r, idx) => {
-        const rec = perRule[idx];
-        wsSum.addRow([
-          idx + 1,
-          rec.title,
-          r.field,
-          r.op,
-          r.value ?? '',
-          r.ifcType ?? '',
-          r.color ?? 'red',
-          rec.count,
-        ]);
-      });
-
-      // GUIDs-Sheet
-      const wsGuids = wb.addWorksheet('GUIDs');
-      const gh = wsGuids.addRow(['Rule #', 'Rule Title', 'GUID']);
-      gh.eachCell(c => ((c as any).font = { bold: true }));
-      perRule.forEach(rec => rec.guids.forEach(g => wsGuids.addRow([rec.index + 1, rec.title, g])));
-
-      // >>> hier die sensible Stelle: Buffer-Konvertierung
-      const raw = await (wb.xlsx as any).writeBuffer();   // kann ArrayBuffer/Uint8Array/Buffer sein
-      const nodeBuf = toNodeBuffer(raw);                  // garantiert Node-Buffer
-      const bin = await this.helpers.prepareBinaryData(nodeBuf as any);
+      const xbuf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as unknown as Buffer;
+      const bin = await this.helpers.prepareBinaryData(xbuf);
       bin.fileName = 'validation_report.xlsx';
       bin.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -420,7 +331,7 @@ export class BimxRuleValidator implements INodeType {
       for (const rec of perRule) {
         const csv = toCsv(rec.guids.map(g => ({ rule: rec.title, guid: g })));
         const csvBuf = Buffer.from(csv, 'utf8');
-        const bin = await this.helpers.prepareBinaryData(csvBuf as any);
+        const bin = await this.helpers.prepareBinaryData(csvBuf);
         bin.fileName = `guids_${(rec.title || `rule_${rec.index + 1}`)}.csv`;
         bin.mimeType = 'text/csv';
         outGuid.push({ json: { rule: rec.title, count: rec.count }, binary: { csv: bin } });
