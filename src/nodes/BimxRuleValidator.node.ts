@@ -142,7 +142,7 @@ function toCsv(rows: Array<Record<string, any>>): string {
   const esc = (v: any) => {
     const s = v == null ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
+  };
   const lines: string[] = [];
   lines.push(headers.join(','));
   for (const r of rows) lines.push(headers.map((h) => esc(r[h])).join(','));
@@ -151,6 +151,14 @@ function toCsv(rows: Array<Record<string, any>>): string {
 
 const FILL_RED = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCDD2' } }; // light red
 const FILL_YEL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // light yellow
+
+// Robust: konvertiert ExcelJS writeBuffer() Resultate verlässlich in Node-Buffer
+function toNodeBuffer(raw: unknown): Buffer {
+  if (Buffer.isBuffer(raw)) return raw as Buffer;
+  if (raw instanceof ArrayBuffer) return Buffer.from(new Uint8Array(raw));
+  if (ArrayBuffer.isView(raw)) return Buffer.from((raw as ArrayBufferView).buffer);
+  return Buffer.from(String(raw ?? ''), 'binary');
+}
 
 /* -------------------------------------------------------------------------- */
 /* Node                                                                        */
@@ -510,12 +518,9 @@ export class BimxRuleValidator implements INodeType {
         for (const g of rec.guids) wsGuid.addRow([rec.ruleIndex + 1, rec.ruleTitle, g]);
       });
 
-      // writeBuffer → Node-Buffer
-      const raw: any = await (wb.xlsx as any).writeBuffer();
-      // robust: ArrayBuffer → Buffer; Buffer bleibt Buffer
-      const nodeBuf: Buffer = Buffer.isBuffer(raw)
-        ? raw
-        : Buffer.from(new Uint8Array(raw as ArrayBuffer));
+      // writeBuffer → Node-Buffer (robust gegen ArrayBuffer/Uint8Array/Buffer)
+      const raw: unknown = await (wb.xlsx as any).writeBuffer();
+      const nodeBuf: Buffer = toNodeBuffer(raw);
       const bin = await this.helpers.prepareBinaryData(nodeBuf);
       bin.fileName = 'validation_report.xlsx';
       bin.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
