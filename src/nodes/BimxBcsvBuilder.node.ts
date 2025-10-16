@@ -2,36 +2,29 @@
 import type { IExecuteFunctions, INodeExecutionData, INodeType, INodeTypeDescription } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-type InRule = {
+type SimpleRule = {
   title: string;
   guids: string[];
-  color?: string;      // 'red' | '#RRGGBB' | '255,0,0' etc.
-  field?: string;
-  operator?: string;
-  pattern?: string;
+  color?: { r: number; g: number; b: number };
 };
 
-function parseColorToRGB(c?: string): { r: number; g: number; b: number } {
-  if (!c) return { r: 255, g: 0, b: 0 };
-  const lower = c.toLowerCase();
-  const named: Record<string, [number, number, number]> = {
-    red: [255, 0, 0], yellow: [255, 193, 7], orange: [255, 145, 0],
-    green: [34, 197, 94], blue: [59, 130, 246], purple: [139, 92, 246],
-  };
-  if (named[lower]) {
-    const [r, g, b] = named[lower];
-    return { r, g, b };
-  }
-  const csv = c.match(/^(\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})$/);
-  if (csv) return { r: +csv[1], g: +csv[2], b: +csv[3] };
-  const hex = c.replace('#', '');
-  if (/^[0-9a-f]{6}$/i.test(hex)) {
-    const r = parseInt(hex.slice(0, 2), 16);
-    const g = parseInt(hex.slice(2, 4), 16);
-    const b = parseInt(hex.slice(4, 6), 16);
-    return { r, g, b };
-  }
-  return { r: 255, g: 0, b: 0 };
+function uuidLike(): string {
+  const h = () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+  const s = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
+  // RFC-ähnlich, reicht für BIMcollab
+  return `${h().slice(0,8)}-${s()}-${s()}-${s()}-${h()}${s()}`.toLowerCase();
+}
+
+function esc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function pickColor(rule: SimpleRule | undefined, respect: boolean, defR: number, defG: number, defB: number) {
+  if (respect && rule?.color) return rule.color;
+  return { r: defR, g: defG, b: defB };
 }
 
 export class BimxBcsvBuilder implements INodeType {
@@ -41,18 +34,20 @@ export class BimxBcsvBuilder implements INodeType {
     group: ['transform'],
     version: 1,
     icon: 'file:BIMX.svg',
-    description: 'Erzeugt BIMcollab SmartViews (.bcsv) aus Rule-Validator-Ergebnissen',
+    description: 'Builds BIMcollab SmartViews (.bcsv) from Rule Validator output (GUID lists per rule)',
     defaults: { name: 'BIM X – SmartViews Builder' },
     inputs: ['main'],
     outputs: ['main'],
     properties: [
       {
         displayName: 'Source (Rule Results)',
-        name: 'sourceMode',
+        name: 'source',
         type: 'options',
-        default: 'prev',
+        default: 'auto',
         options: [
-          { name: 'From previous node JSON (rules array)', value: 'prev' },
+          { name: 'From previous node JSON (rules array)', value: 'rules' },
+          { name: 'From previous node JSON (perRule array)', value: 'perRule' },
+          { name: 'Auto-detect (rules or perRule)', value: 'auto' },
         ],
       },
       {
@@ -60,14 +55,49 @@ export class BimxBcsvBuilder implements INodeType {
         name: 'setTitle',
         type: 'string',
         default: 'BIM X – Validation Set',
-        description: 'Titel des SmartView-Sets',
+        description: 'Will be used as SMARTVIEWSET title and as group name in each SMARTVIEW',
       },
-      { displayName: 'Creator', name: 'creator', type: 'string', default: 'BIM X' },
-      { displayName: 'Version', name: 'version', type: 'string', default: '1.0' },
-      { displayName: 'Respect Rule Colors', name: 'respectColors', type: 'boolean', default: true },
-      { displayName: 'Isolate Elements', name: 'isolate', type: 'boolean', default: true },
-      { displayName: 'Include Timestamp', name: 'withTs', type: 'boolean', default: true },
-      { displayName: 'File Name', name: 'fileName', type: 'string', default: 'smartviews.bcsv' },
+      {
+        displayName: 'Creator',
+        name: 'creator',
+        type: 'string',
+        default: 'BIM X',
+      },
+      {
+        displayName: 'Version (info/version)',
+        name: 'versionStr',
+        type: 'string',
+        default: '1.0',
+      },
+      {
+        displayName: 'Respect Rule Colors',
+        name: 'respectRuleColors',
+        type: 'boolean',
+        default: true,
+      },
+      {
+        displayName: 'Default Color',
+        name: 'defaultColor',
+        type: 'collection',
+        default: {},
+        options: [
+          { displayName: 'R', name: 'r', type: 'number', default: 255, typeOptions: { minValue: 0, maxValue: 255 } },
+          { displayName: 'G', name: 'g', type: 'number', default: 0,   typeOptions: { minValue: 0, maxValue: 255 } },
+          { displayName: 'B', name: 'b', type: 'number', default: 0,   typeOptions: { minValue: 0, maxValue: 255 } },
+        ],
+      },
+      {
+        displayName: 'Include Timestamp',
+        name: 'withTimestamp',
+        type: 'boolean',
+        default: true,
+      },
+      {
+        displayName: 'File Name',
+        name: 'fileName',
+        type: 'string',
+        default: 'smartviews.bcsv',
+      },
     ],
   };
 
@@ -75,91 +105,154 @@ export class BimxBcsvBuilder implements INodeType {
     const items = this.getInputData();
     if (!items.length) return [items];
 
+    const optSource = this.getNodeParameter('source', 0) as 'auto' | 'rules' | 'perRule';
     const setTitle = this.getNodeParameter('setTitle', 0) as string;
     const creator  = this.getNodeParameter('creator', 0) as string;
-    const version  = this.getNodeParameter('version', 0) as string;
-    const respectColors = this.getNodeParameter('respectColors', 0) as boolean;
-    const isolate  = this.getNodeParameter('isolate', 0) as boolean;
-    const withTs   = this.getNodeParameter('withTs', 0) as boolean;
+    const versionStr = this.getNodeParameter('versionStr', 0) as string;
+    const respectColors = this.getNodeParameter('respectRuleColors', 0) as boolean;
+    const defColor = (this.getNodeParameter('defaultColor', 0) as any) || {};
+    const defR = Number(defColor.r ?? 255);
+    const defG = Number(defColor.g ?? 0);
+    const defB = Number(defColor.b ?? 0);
+    const withTs = this.getNodeParameter('withTimestamp', 0) as boolean;
     const fileName = this.getNodeParameter('fileName', 0) as string;
 
-    // ---- Eingabe erkennen: rules[] ODER perRule[]
-    let rules: InRule[] | undefined;
-    const src = items[0]?.json ?? {};
-    if (Array.isArray((src as any).rules)) {
-      rules = (src as any).rules as InRule[];
-    } else if (Array.isArray((src as any).perRule)) {
-      rules = ((src as any).perRule as any[]).map((r, idx): InRule => ({
-        title: r.title ?? `Rule ${idx + 1}`,
-        guids: Array.isArray(r.guids) ? r.guids : [],
-        color: r.color,
-        field: r.field,
-        operator: r.operator,
-        pattern: r.pattern,
-      }));
-    }
+    const nowIso = new Date().toISOString().slice(0,19); // yyyy-mm-ddTHH:MM:SS
 
-    if (!rules || !rules.length) {
-      throw new NodeOperationError(this.getNode(), 'Expected item[0].json.rules (oder perRule) array from Rule Validator.');
-    }
+    // ---- Input normalisieren (rules[] oder perRule[])
+    const root = items[0]?.json ?? {};
+    let rulesIn: SimpleRule[] = [];
 
-    const now = new Date().toISOString();
+    const hasRules   = Array.isArray((root as any).rules);
+    const hasPerRule = Array.isArray((root as any).perRule);
 
-    // ---- BCSV (XML) zusammenbauen
-    const xmlEsc = (s: string) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+    const source = optSource === 'auto'
+      ? (hasRules ? 'rules' : (hasPerRule ? 'perRule' : 'rules'))
+      : optSource;
 
-    const parts: string[] = [];
-    parts.push('<?xml version="1.0" encoding="UTF-8"?>');
-    parts.push('<SMARTVIEWSET>');
-    parts.push(`  <TITLE>${xmlEsc(setTitle)}</TITLE>`);
-    parts.push(`  <CREATOR>${xmlEsc(creator)}</CREATOR>`);
-    parts.push(`  <VERSION>${xmlEsc(version)}</VERSION>`);
-    if (withTs) parts.push(`  <TIMESTAMP>${xmlEsc(now)}</TIMESTAMP>`);
-    parts.push('  <SMARTVIEWS>');
-
-    for (const rule of rules) {
-      const name = rule.title || 'Rule';
-      const { r, g, b } = respectColors ? parseColorToRGB(rule.color) : { r: 255, g: 0, b: 0 };
-
-      parts.push('    <SMARTVIEW>');
-      parts.push(`      <NAME>${xmlEsc(name)}</NAME>`);
-      parts.push(`      <ISOLATE>${isolate ? 'true' : 'false'}</ISOLATE>`);
-      parts.push('      <RULES>');
-
-      // wir nutzen GUID-Einzelregeln, damit SmartViews die Elemente exakt treffen
-      for (const guid of (rule.guids || [])) {
-        parts.push('        <RULE>');
-        parts.push('          <IFCTYPE>Any</IFCTYPE>');
-        parts.push('          <PROPERTY>');
-        parts.push('            <NAME>GUID</NAME>');
-        parts.push('            <PROPERTYSETNAME>Summary</PROPERTYSETNAME>');
-        parts.push('            <TYPE>Summary</TYPE>');
-        parts.push('            <VALUETYPE>StringValue</VALUETYPE>');
-        parts.push('            <UNIT>None</UNIT>');
-        parts.push('          </PROPERTY>');
-        parts.push('          <CONDITION>');
-        parts.push('            <TYPE>Is</TYPE>');
-        parts.push(`            <VALUE>${xmlEsc(guid)}</VALUE>`);
-        parts.push('          </CONDITION>');
-        parts.push('          <ACTION>');
-        parts.push('            <TYPE>AddSetColored</TYPE>');
-        parts.push(`            <R>${r}</R><G>${g}</G><B>${b}</B>`);
-        parts.push('          </ACTION>');
-        parts.push('        </RULE>');
+    if (source === 'rules') {
+      if (!hasRules) {
+        throw new NodeOperationError(this.getNode(), 'Expected item[0].json.rules array from Rule Validator.');
       }
-
-      parts.push('      </RULES>');
-      parts.push('    </SMARTVIEW>');
+      for (const r of (root as any).rules as any[]) {
+        const title = String(r.title ?? r.name ?? 'Rule');
+        const guids = Array.isArray(r.guids) ? r.guids.map(String) : [];
+        const color = r.color && typeof r.color === 'object'
+          ? { r: Number(r.color.r ?? defR), g: Number(r.color.g ?? defG), b: Number(r.color.b ?? defB) }
+          : undefined;
+        rulesIn.push({ title, guids, color });
+      }
+    } else { // perRule
+      if (!hasPerRule) {
+        throw new NodeOperationError(this.getNode(), 'Expected item[0].json.perRule array from Rule Validator.');
+      }
+      for (const r of (root as any).perRule as any[]) {
+        const title = String(r.title ?? r.name ?? 'Rule');
+        const guids = Array.isArray(r.guids) ? r.guids.map(String) : [];
+        rulesIn.push({ title, guids });
+      }
     }
 
-    parts.push('  </SMARTVIEWS>');
-    parts.push('</SMARTVIEWSET>');
+    // GUIDs deduplizieren + leere entfernen
+    rulesIn = rulesIn.map(r => ({
+      ...r,
+      guids: Array.from(new Set((r.guids || []).map(g => g.trim()).filter(Boolean))),
+    })).filter(r => r.guids.length > 0);
 
-    const xml = parts.join('\n');
-    const bin = await this.helpers.prepareBinaryData(Buffer.from(xml, 'utf8'));
+    if (!rulesIn.length) {
+      throw new NodeOperationError(this.getNode(), 'No GUIDs found in rules/perRule.');
+    }
+
+    // ---- BIMcollab Header/Wrapper
+    const header =
+`<?xml version="1.0" encoding="UTF-8"?>
+<bimcollabsmartviewfile version="8">
+  <info>
+    <version>${esc(versionStr)}</version>
+    <application>BIM X – n8n</application>
+    <date>${withTs ? nowIso : ''}</date>
+  </info>
+  <settings>
+    <openBimMode>true</openBimMode>
+  </settings>
+</bimcollabsmartviewfile>
+`;
+
+    // ---- SMARTVIEWSET + SMARTVIEWS
+    const setGuid = uuidLike();
+    const setBlockOpen =
+`<SMARTVIEWSETS>
+  <SMARTVIEWSET>
+    <TITLE>${esc(setTitle)}</TITLE>
+    <DESCRIPTION></DESCRIPTION>
+    <GUID>${setGuid}</GUID>
+    <MODIFICATIONDATE>${withTs ? nowIso : ''}</MODIFICATIONDATE>
+    <SMARTVIEWS>
+`;
+
+    const setBlockClose =
+`    </SMARTVIEWS>
+  </SMARTVIEWSET>
+</SMARTVIEWSETS>
+`;
+
+    // ---- SMARTVIEWs aus Regeln
+    const viewsXml = rulesIn.map((rule) => {
+      const vGuid = uuidLike();
+      const col = pickColor(rule, respectColors, defR, defG, defB);
+
+      // Eine RULE pro GUID
+      const rulesXml = rule.guids.map(guid => {
+        return (
+`        <RULE>
+          <IFCTYPE>Any</IFCTYPE>
+          <PROPERTY>
+            <NAME>GUID</NAME>
+            <PROPERTYSETNAME>Summary</PROPERTYSETNAME>
+            <TYPE>Summary</TYPE>
+            <VALUETYPE>StringValue</VALUETYPE>
+            <UNIT>None</UNIT>
+          </PROPERTY>
+          <CONDITION>
+            <TYPE>Is</TYPE>
+            <VALUE>${esc(guid)}</VALUE>
+          </CONDITION>
+          <ACTION>
+            <TYPE>AddSetColored</TYPE>
+            <R>${col.r}</R>
+            <G>${col.g}</G>
+            <B>${col.b}</B>
+          </ACTION>
+        </RULE>`
+        );
+      }).join('\n');
+
+      return (
+`      <SMARTVIEW>
+        <TITLE>${esc(rule.title)}</TITLE>
+        <DESCRIPTION></DESCRIPTION>
+        <CREATOR>${esc(creator)}</CREATOR>
+        <CREATIONDATE>${withTs ? nowIso : ''}</CREATIONDATE>
+        <MODIFIER>${esc(creator)}</MODIFIER>
+        <MODIFICATIONDATE>${withTs ? nowIso : ''}</MODIFICATIONDATE>
+        <GUID>${vGuid}</GUID>
+        <GROUPS><GROUP>${esc(setTitle)}</GROUP></GROUPS>
+        <RULES>
+${rulesXml}
+        </RULES>
+      </SMARTVIEW>`
+      );
+    }).join('\n');
+
+    const full = header + setBlockOpen + viewsXml + '\n' + setBlockClose;
+
+    // ---- Binary ausgeben
+    const bin = await this.helpers.prepareBinaryData(Buffer.from(full, 'utf8'));
     bin.fileName = fileName;
-    bin.mimeType = 'application/xml';
+    bin.fileExtension = 'bcsv';
+    bin.mimeType = 'text/xml';
 
-    return [[{ json: { count: rules.length, setTitle, creator, version }, binary: { bcsv: bin } }]];
+    const out: INodeExecutionData = { json: { views: rulesIn.length, rules: rulesIn.map(r => ({ title: r.title, hits: r.guids.length })) }, binary: { bcsv: bin } };
+    return [[out]];
   }
 }
