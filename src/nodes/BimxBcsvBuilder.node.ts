@@ -11,21 +11,15 @@ type SimpleRule = {
 function uuidLike(): string {
   const h = () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
   const s = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
-  // RFC-ähnlich, reicht für BIMcollab
-  return `${h().slice(0,8)}-${s()}-${s()}-${s()}-${h()}${s()}`.toLowerCase();
+  return `${h().slice(0, 8)}-${s()}-${s()}-${s()}-${h()}${s()}`.toLowerCase();
 }
 
 function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function pickColor(rule: SimpleRule | undefined, respect: boolean, defR: number, defG: number, defB: number) {
-  if (respect && rule?.color) return rule.color;
-  return { r: defR, g: defG, b: defB };
-}
+function sp(n: number) { return ' '.repeat(n * 4); } // 4-space indent
+const NL = '\r\n';
 
 export class BimxBcsvBuilder implements INodeType {
   description: INodeTypeDescription = {
@@ -45,32 +39,32 @@ export class BimxBcsvBuilder implements INodeType {
         type: 'options',
         default: 'auto',
         options: [
+          { name: 'Auto-detect (rules or perRule)', value: 'auto' },
           { name: 'From previous node JSON (rules array)', value: 'rules' },
           { name: 'From previous node JSON (perRule array)', value: 'perRule' },
-          { name: 'Auto-detect (rules or perRule)', value: 'auto' },
         ],
       },
       {
         displayName: 'Set Title',
         name: 'setTitle',
         type: 'string',
-        default: 'BIM X – Validation Set',
-        description: 'Will be used as SMARTVIEWSET title and as group name in each SMARTVIEW',
+        default: 'Validation Report',
+        description: 'Used as <TITLE> of SMARTVIEWSET',
       },
       {
-        displayName: 'Creator',
+        displayName: 'Creator (email)',
         name: 'creator',
         type: 'string',
-        default: 'BIM X',
+        default: 'info@bim-x-consulting.de', // wie von dir gewünscht
       },
       {
-        displayName: 'Version (info/version)',
-        name: 'versionStr',
-        type: 'string',
-        default: '1.0',
+        displayName: 'Include Timestamp',
+        name: 'withTimestamp',
+        type: 'boolean',
+        default: true,
       },
       {
-        displayName: 'Respect Rule Colors',
+        displayName: 'Respect Rule Colors (if provided)',
         name: 'respectRuleColors',
         type: 'boolean',
         default: true,
@@ -87,12 +81,6 @@ export class BimxBcsvBuilder implements INodeType {
         ],
       },
       {
-        displayName: 'Include Timestamp',
-        name: 'withTimestamp',
-        type: 'boolean',
-        default: true,
-      },
-      {
         displayName: 'File Name',
         name: 'fileName',
         type: 'string',
@@ -105,154 +93,141 @@ export class BimxBcsvBuilder implements INodeType {
     const items = this.getInputData();
     if (!items.length) return [items];
 
-    const optSource = this.getNodeParameter('source', 0) as 'auto' | 'rules' | 'perRule';
+    const sourceOpt = this.getNodeParameter('source', 0) as 'auto' | 'rules' | 'perRule';
     const setTitle = this.getNodeParameter('setTitle', 0) as string;
     const creator  = this.getNodeParameter('creator', 0) as string;
-    const versionStr = this.getNodeParameter('versionStr', 0) as string;
-    const respectColors = this.getNodeParameter('respectRuleColors', 0) as boolean;
-    const defColor = (this.getNodeParameter('defaultColor', 0) as any) || {};
-    const defR = Number(defColor.r ?? 255);
-    const defG = Number(defColor.g ?? 0);
-    const defB = Number(defColor.b ?? 0);
-    const withTs = this.getNodeParameter('withTimestamp', 0) as boolean;
+    const withTs   = this.getNodeParameter('withTimestamp', 0) as boolean;
+    const respect  = this.getNodeParameter('respectRuleColors', 0) as boolean;
+    const defCol   = (this.getNodeParameter('defaultColor', 0) as any) || {};
+    const defR = Number(defCol.r ?? 255), defG = Number(defCol.g ?? 0), defB = Number(defCol.b ?? 0);
     const fileName = this.getNodeParameter('fileName', 0) as string;
 
-    const nowIso = new Date().toISOString().slice(0,19); // yyyy-mm-ddTHH:MM:SS
+    const nowIso = new Date().toISOString().slice(0, 19); // yyyy-mm-ddTHH:MM:SS
 
-    // ---- Input normalisieren (rules[] oder perRule[])
+    // ---- Input normalisieren
     const root = items[0]?.json ?? {};
-    let rulesIn: SimpleRule[] = [];
-
     const hasRules   = Array.isArray((root as any).rules);
     const hasPerRule = Array.isArray((root as any).perRule);
+    const source = sourceOpt === 'auto' ? (hasRules ? 'rules' : (hasPerRule ? 'perRule' : 'rules')) : sourceOpt;
 
-    const source = optSource === 'auto'
-      ? (hasRules ? 'rules' : (hasPerRule ? 'perRule' : 'rules'))
-      : optSource;
-
+    let rules: SimpleRule[] = [];
     if (source === 'rules') {
-      if (!hasRules) {
-        throw new NodeOperationError(this.getNode(), 'Expected item[0].json.rules array from Rule Validator.');
-      }
+      if (!hasRules) throw new NodeOperationError(this.getNode(), 'Expected item[0].json.rules array.');
       for (const r of (root as any).rules as any[]) {
         const title = String(r.title ?? r.name ?? 'Rule');
         const guids = Array.isArray(r.guids) ? r.guids.map(String) : [];
         const color = r.color && typeof r.color === 'object'
           ? { r: Number(r.color.r ?? defR), g: Number(r.color.g ?? defG), b: Number(r.color.b ?? defB) }
           : undefined;
-        rulesIn.push({ title, guids, color });
+        rules.push({ title, guids, color });
       }
-    } else { // perRule
-      if (!hasPerRule) {
-        throw new NodeOperationError(this.getNode(), 'Expected item[0].json.perRule array from Rule Validator.');
-      }
+    } else {
+      if (!hasPerRule) throw new NodeOperationError(this.getNode(), 'Expected item[0].json.perRule array.');
       for (const r of (root as any).perRule as any[]) {
         const title = String(r.title ?? r.name ?? 'Rule');
         const guids = Array.isArray(r.guids) ? r.guids.map(String) : [];
-        rulesIn.push({ title, guids });
+        rules.push({ title, guids });
       }
     }
 
-    // GUIDs deduplizieren + leere entfernen
-    rulesIn = rulesIn.map(r => ({
+    // GUIDs deduplizieren/aufräumen, leere entfernen, nur Regeln mit Treffern ausgeben
+    rules = rules.map(r => ({
       ...r,
       guids: Array.from(new Set((r.guids || []).map(g => g.trim()).filter(Boolean))),
     })).filter(r => r.guids.length > 0);
 
-    if (!rulesIn.length) {
-      throw new NodeOperationError(this.getNode(), 'No GUIDs found in rules/perRule.');
+    if (!rules.length) throw new NodeOperationError(this.getNode(), 'No GUIDs found.');
+
+    // ---- Header exakt wie im BIMcollab-Beispiel
+    const header =
+      `<?xml version="1.0"?>${NL}` +
+      `<bimcollabsmartviewfile>${NL}` +
+      `${sp(1)}<version>8</version>${NL}` +
+      `${sp(1)}<applicationversion>Win - Version: 9.6 (build 9.6.6.0)</applicationversion>${NL}` +
+      `</bimcollabsmartviewfile>${NL}${NL}`;
+
+    // ---- SMARTVIEWSET aufbauen
+    const setGuid = uuidLike();
+    let xml = header;
+    xml += `<SMARTVIEWSETS>${NL}`;
+    xml += `${sp(1)}<SMARTVIEWSET>${NL}`;
+    xml += `${sp(2)}<TITLE>${esc(setTitle)}</TITLE>${NL}`;
+    xml += `${sp(2)}<DESCRIPTION></DESCRIPTION>${NL}`;
+    xml += `${sp(2)}<GUID>${setGuid}</GUID>${NL}`;
+    xml += `${sp(2)}<MODIFICATIONDATE>${withTs ? nowIso : ''}</MODIFICATIONDATE>${NL}`;
+    xml += `${sp(2)}<SMARTVIEWS>${NL}`;
+
+    // ---- pro Regel genau 1 SMARTVIEW
+    for (const r of rules) {
+      const vGuid = uuidLike();
+      const col = respect && r.color ? r.color : { r: defR, g: defG, b: defB };
+
+      xml += `${sp(3)}<SMARTVIEW>${NL}`;
+      xml += `${sp(4)}<TITLE>${esc(r.title)}</TITLE>${NL}`;
+      xml += `${sp(4)}<DESCRIPTION></DESCRIPTION>${NL}`;
+      xml += `${sp(4)}<CREATOR>${esc(creator)}</CREATOR>${NL}`;
+      xml += `${sp(4)}<CREATIONDATE>${withTs ? nowIso : ''}</CREATIONDATE>${NL}`;
+      xml += `${sp(4)}<MODIFIER>${esc(creator)}</MODIFIER>${NL}`;
+      xml += `${sp(4)}<MODIFICATIONDATE>${withTs ? nowIso : ''}</MODIFICATIONDATE>${NL}`;
+      xml += `${sp(4)}<GUID>${vGuid}</GUID>${NL}`;
+      // keine <GROUPS> – entspricht deinem Beispiel
+
+      xml += `${sp(4)}<RULES>${NL}`;
+      for (const guid of r.guids) {
+        xml += `${sp(5)}<RULE>${NL}`;
+        xml += `${sp(6)}<IFCTYPE>Any</IFCTYPE>${NL}`;
+        xml += `${sp(6)}<PROPERTY>${NL}`;
+        xml += `${sp(7)}<NAME>GUID</NAME>${NL}`;
+        xml += `${sp(7)}<PROPERTYSETNAME>Summary</PROPERTYSETNAME>${NL}`;
+        xml += `${sp(7)}<TYPE>Summary</TYPE>${NL}`;
+        xml += `${sp(7)}<VALUETYPE>StringValue</VALUETYPE>${NL}`;
+        xml += `${sp(7)}<UNIT>None</UNIT>${NL}`;
+        xml += `${sp(6)}</PROPERTY>${NL}`;
+        xml += `${sp(6)}<CONDITION>${NL}`;
+        xml += `${sp(7)}<TYPE>Is</TYPE>${NL}`;
+        xml += `${sp(7)}<VALUE>${esc(guid)}</VALUE>${NL}`;
+        xml += `${sp(6)}</CONDITION>${NL}`;
+        xml += `${sp(6)}<ACTION>${NL}`;
+        xml += `${sp(7)}<TYPE>AddSetColored</TYPE>${NL}`;
+        xml += `${sp(7)}<R>${col.r}</R>${NL}`;
+        xml += `${sp(7)}<G>${col.g}</G>${NL}`;
+        xml += `${sp(7)}<B>${col.b}</B>${NL}`;
+        xml += `${sp(7)}<A>255</A>${NL}`; // Alpha wie im Beispiel
+        xml += `${sp(6)}</ACTION>${NL}`;
+        xml += `${sp(5)}</RULE>${NL}`;
+      }
+      xml += `${sp(4)}</RULES>${NL}`;
+
+      // Pflichtblöcke wie im Beispiel
+      xml += `${sp(4)}<INFORMATIONTAKEOFF>${NL}`;
+      xml += `${sp(5)}<PROPERTYSETNAME>None</PROPERTYSETNAME>${NL}`;
+      xml += `${sp(5)}<PROPERTYNAME>None</PROPERTYNAME>${NL}`;
+      xml += `${sp(5)}<OPERATION>0</OPERATION>${NL}`;
+      xml += `${sp(4)}</INFORMATIONTAKEOFF>${NL}`;
+      xml += `${sp(4)}<EXPLODEMODE>KeepParentsAndChildren</EXPLODEMODE>${NL}`;
+
+      xml += `${sp(3)}</SMARTVIEW>${NL}`;
     }
 
-    // ---- BIMcollab Header/Wrapper
-    const header =
-`<?xml version="1.0" encoding="UTF-8"?>
-<bimcollabsmartviewfile version="8">
-  <info>
-    <version>${esc(versionStr)}</version>
-    <application>BIM X – n8n</application>
-    <date>${withTs ? nowIso : ''}</date>
-  </info>
-  <settings>
-    <openBimMode>true</openBimMode>
-  </settings>
-</bimcollabsmartviewfile>
-`;
-
-    // ---- SMARTVIEWSET + SMARTVIEWS
-    const setGuid = uuidLike();
-    const setBlockOpen =
-`<SMARTVIEWSETS>
-  <SMARTVIEWSET>
-    <TITLE>${esc(setTitle)}</TITLE>
-    <DESCRIPTION></DESCRIPTION>
-    <GUID>${setGuid}</GUID>
-    <MODIFICATIONDATE>${withTs ? nowIso : ''}</MODIFICATIONDATE>
-    <SMARTVIEWS>
-`;
-
-    const setBlockClose =
-`    </SMARTVIEWS>
-  </SMARTVIEWSET>
-</SMARTVIEWSETS>
-`;
-
-    // ---- SMARTVIEWs aus Regeln
-    const viewsXml = rulesIn.map((rule) => {
-      const vGuid = uuidLike();
-      const col = pickColor(rule, respectColors, defR, defG, defB);
-
-      // Eine RULE pro GUID
-      const rulesXml = rule.guids.map(guid => {
-        return (
-`        <RULE>
-          <IFCTYPE>Any</IFCTYPE>
-          <PROPERTY>
-            <NAME>GUID</NAME>
-            <PROPERTYSETNAME>Summary</PROPERTYSETNAME>
-            <TYPE>Summary</TYPE>
-            <VALUETYPE>StringValue</VALUETYPE>
-            <UNIT>None</UNIT>
-          </PROPERTY>
-          <CONDITION>
-            <TYPE>Is</TYPE>
-            <VALUE>${esc(guid)}</VALUE>
-          </CONDITION>
-          <ACTION>
-            <TYPE>AddSetColored</TYPE>
-            <R>${col.r}</R>
-            <G>${col.g}</G>
-            <B>${col.b}</B>
-          </ACTION>
-        </RULE>`
-        );
-      }).join('\n');
-
-      return (
-`      <SMARTVIEW>
-        <TITLE>${esc(rule.title)}</TITLE>
-        <DESCRIPTION></DESCRIPTION>
-        <CREATOR>${esc(creator)}</CREATOR>
-        <CREATIONDATE>${withTs ? nowIso : ''}</CREATIONDATE>
-        <MODIFIER>${esc(creator)}</MODIFIER>
-        <MODIFICATIONDATE>${withTs ? nowIso : ''}</MODIFICATIONDATE>
-        <GUID>${vGuid}</GUID>
-        <GROUPS><GROUP>${esc(setTitle)}</GROUP></GROUPS>
-        <RULES>
-${rulesXml}
-        </RULES>
-      </SMARTVIEW>`
-      );
-    }).join('\n');
-
-    const full = header + setBlockOpen + viewsXml + '\n' + setBlockClose;
+    xml += `${sp(2)}</SMARTVIEWS>${NL}`;
+    xml += `${sp(1)}</SMARTVIEWSET>${NL}`;
+    xml += `</SMARTVIEWSETS>${NL}`;
 
     // ---- Binary ausgeben
-    const bin = await this.helpers.prepareBinaryData(Buffer.from(full, 'utf8'));
+    const bin = await this.helpers.prepareBinaryData(Buffer.from(xml, 'utf8'));
     bin.fileName = fileName;
     bin.fileExtension = 'bcsv';
     bin.mimeType = 'text/xml';
 
-    const out: INodeExecutionData = { json: { views: rulesIn.length, rules: rulesIn.map(r => ({ title: r.title, hits: r.guids.length })) }, binary: { bcsv: bin } };
+    const out: INodeExecutionData = {
+      json: {
+        setTitle,
+        views: rules.length,
+        totalGuids: rules.reduce((s, r) => s + r.guids.length, 0),
+      },
+      binary: { bcsv: bin },
+    };
+
     return [[out]];
   }
 }
