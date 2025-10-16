@@ -1,353 +1,257 @@
-# n8n-nodes-bimx-ifc-qto
+# 🧱 BIM X – IFC QTO (n8n Community Node)
 
-Binary IFC → XLSX/TSV with Area/Volume for IfcSpace, powered by web-ifc (WASM).
-Input: Binary property (default data)
-Output: xlsx and/or tsv in item.binary, plus json.count.
+A collection of n8n Community Nodes for IFC extraction, reporting, and validation:  
+Space QTO, Attribute Export, Table Filter, Rule Validator, SmartViews/BCSV Builder, and Watch/Preview Node.
 
-## ✨ What this Node does
+---
 
-Reads an IFC file from an n8n item’s binary property.
+## 🧩 Key Nodes & Workflow
 
-Extracts IfcSpace rows and outputs a table (XLSX/TSV).
+### 🧱 BIM X – IFC Space QTO
+Reads binary IFC files (`binary` property, e.g., from Read Binary File node) and exports `IfcSpace` records as XLSX/TSV + JSON.  
+Calculates Area and Volume from IFC quantities or via geometry fallback.  
+Rename fields, add extra properties, and round decimals.
 
-Returns Area and Volume either from IFC Quantities or by computing them from geometry meshes (fallback or forced).
+➡️ Ideal for generating room schedules for thermal calculations, dashboards, or AI pipelines.
 
-Can include any IFC property you need (all or selected).
+---
 
-Can rename attributes on the fly (e.g., map a misplaced room number from Name → RoomNumber).
+### 🧾 BIM X – IFC Attribute Export
+Exports IFC model properties to XLSX or JSON.  
+Modes:
 
-Rounds numeric fields to a chosen number of decimals.
+- **Wide:** One row per element with all properties  
+- **Narrow:** Key/Value format for easier merging or rule checks  
 
-Works locally and on self-hosted n8n.
+Supports filtering by entity types and excluding meta classes (e.g. `IfcProject`, `IfcSite`).
+
+---
+
+### 🔍 BIM X – Table Filter
+Filters any tabular dataset by:
+
+- Column  
+- Operator (=, ≠, >, <, regex, etc.)  
+- Value  
+
+Works like a lightweight query engine inside n8n — no code required.
+
+---
+
+### ✅ BIM X – Rule Validator
+Executes validation rules on exported tables.  
+Each rule: Field, Operator, Value or Regex.  
+Output options:
+
+- XLSX report (optional highlighting)  
+- JSON metadata (GUID lists per rule)  
+- CSV lists per rule  
+
+Rules can be imported via JSON or YAML.  
+Perfect for QA/QC checks in BIM processes.
+
+---
+
+### 🎨 BIM X – SmartViews / BCSV Builder
+Processes Rule Validator output (GUID lists) and generates a BIMcollab SmartViews (`.bcsv`) file.  
+Import in BIMcollab → automatically isolate and color invalid objects.  
+Customizable colors and isolate flags.
+
+👉 Recommended chain: Rule Validator → BCSV Builder → BIMcollab.
+
+---
+
+### 👀 BIM X – Watch
+Displays data in a compact HTML report (table + charts).  
+Great for quick visual checks in n8n without manual export.
+
+---
+
+## 💡 Why TSV (Tab-separated) instead of CSV?
+IFC data often includes commas — either as decimal separators (in German localization) or within text fields (`"Room 1, Ground Floor"`).  
+TSV avoids delimiter conflicts and import issues.
+
+TSV files can be opened directly in Excel:  
+**Data → From Text/CSV → Delimiter: Tab**
+
+---
+
+## ⚙️ Example Workflow
+
+| Step | Node | Setting |
+|------|------|----------|
+| 1 | Read Binary File | → data |
+| 2 | BIM X – IFC Space QTO | `binaryProperty = data`<br>Generate XLSX = true<br>Round Decimals = 2<br>Use Geometry Fallback = true |
+| 3 | Write Binary File | → `spaces_qto.xlsx` |
+
+(Optional) Send via SharePoint / Email.
+
+---
 
 ## 🧩 Install
+In n8n: Settings → Community Nodes → Install → search for n8n-nodes-bimx-ifc-qto
 
-In n8n: Settings → Community Nodes → Install → search for
-n8n-nodes-bimx-ifc-qto
+---
 
-## ▶️ Usage (minimal)
+## 🧠 Technical Notes
 
-Read Binary File (your IFC) → property data
+- web-ifc (WASM) backend — `IfcAPI.Init()` auto-loaded, no manual WASM path needed
+- Excel export via `xlsx` / `exceljs`
+- TSV writer built manually (UTF-8, tab-separated, decimal comma option)
+- Compatible with self-hosted n8n
+- Productively tested by BIM X Consulting
 
-BIM X – IFC Space QTO (binaryProperty = data)
+---
 
-Write Binary File (XLSX/TSV) or send via SharePoint/Email
+## ☕ Support this project
 
-## ⚙️ Parameters (as in the node UI)
-Required / basics
+If these tools help you, consider buying me a coffee ☕
+👉 PayPal – Daniel Glober / BIM X Consulting
 
-Binary Property (string) – name of the binary field that holds the IFC (default data).
+<p align="center"> <a href="https://www.paypal.me/danielglober"> <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png" width="80" alt="PayPal" /> </a> <br/> <img src="https://raw.githubusercontent.com/bimxconsulting-ops/n8n-nodes-bimx-ifc-qto/main/docs/paypal_qr.png" width="180" alt="PayPal QR Code" /> </p>
 
-Generate XLSX (boolean) – add a xlsx binary file named spaces_qto.xlsx.
+💬 Every cup of coffee helps develop more automation tools for the BIM community!
 
-Generate TSV (comma decimal) (boolean) – add a tsv binary file named spaces_qto.tsv (tab-separated; decimal comma style).
+---
 
-Round Decimals (number) – rounding applied to numeric output values (default in code path when provided).
+## 🧾 License
 
-Options (collection)
+MIT License
+© BIM X Consulting – Daniel Glober
+🌐 www.bim-x-consulting.de
 
-All Parameters (boolean)
-If true, include all IfcSpace properties collected from Psets (IFCPROPERTYSET / IFCPROPERTYSINGLEVALUE) in the output row.
+---
 
-Use Geometry Fallback (boolean)
-If true, and Area/Volume are missing from IFC quantities, the node will compute them from the meshes.
 
-Force Geometry (boolean)
-If true, always compute Area/Volume from geometry and override quantity values found in the IFC.
+🇩🇪 Deutsche Übersetzung
 
-Extra Parameters (multi)
-List of property names to additionally include (if you don’t want all). Example: LongName, OccupancyType, RoomNumber, …
+Binäre IFC → XLSX/TSV (Fläche/Volumen für IfcSpace) — basiert auf web-ifc (WASM).
+Eine Sammlung von n8n Community Nodes für IFC-Extraktion, Reporting und Validierung:
+Space QTO, Attributexport, Tabellenfilter, Regelvalidierung, SmartViews/BCSV Builder und Watch/Preview Node.
 
-Rename (multi)
-Pairs of { parameterName, newName }. If the key exists in the output row, it will be copied to newName (and the old key removed when names differ).
-Example: Name → RoomNumber.
+---
 
-## 📤 Output
+## 🧩 Wichtige Nodes & Workflow
+### 🧱 BIM X – IFC Space QTO
 
-Each processed item yields:
+Liest binäre IFC-Dateien (binary-Property, z. B. aus Read Binary File Node) und exportiert IfcSpace-Datensätze als XLSX/TSV + JSON.
+Berechnet Fläche und Volumen aus IFC-Quantitäten oder über Geometrie-Fallback.
+Du kannst Attribute umbenennen, zusätzliche Eigenschaften hinzufügen und Zahlen runden.
 
-json.count – number of IfcSpace rows produced.
+➡️ Ideal zur Erstellung von Raumtabellen für thermische Berechnungen, Dashboards oder KI-Pipelines.
 
-binary:
+---
 
-xlsx (optional) – Excel workbook, sheet Spaces.
+## 🧾 BIM X – IFC Attribute Export
 
-tsv (optional) – Tab-separated text with headers; decimal-comma style.
+Exportiert Eigenschaften aus dem IFC-Modell nach XLSX oder JSON.
+Modi:
 
-## 🧠 How Area & Volume are computed
+- Wide: Eine Zeile pro Element mit allen Eigenschaften
+- Narrow: Key/Value-Format für einfacheres Zusammenführen oder Prüfen
 
-The node uses web-ifc (IfcAPI) to either:
+Filter nach Entitätstypen oder Ausschluss von Metaklassen (z. B. IfcProject, IfcSite).
 
-Read IFC quantities
+---
 
-Traverses IfcRelDefinesByProperties to find:
+## 🔍 BIM X – Table Filter
 
-IFCELEMENTQUANTITY → IFCQUANTITYAREA and IFCQUANTITYVOLUME
+Filtert beliebige tabellarische Datensätze nach:
 
-IFCPROPERTYSET → IFCPROPERTYSINGLEVALUE (for general props)
+- Spalte
+- Operator (=, ≠, >, <, regex, etc.)
+- Wert
 
-If found (and Force Geometry is off), Area/Volume come directly from these quantities.
+Funktioniert wie eine einfache Abfrage-Engine innerhalb von n8n – ganz ohne Code.
 
-Compute from geometry (when Use Geometry Fallback or Force Geometry is set)
+---
 
-Loads geometry for each IfcSpace (two robust paths are implemented):
+## ✅ BIM X – Rule Validator
 
-Low-level: GetGeometry → GetIndexArray / GetVertexArray
+Führt Validierungsregeln auf exportierten Tabellen aus.
+Jede Regel: Feld, Operator, Wert oder Regex.
+Ausgabe:
 
-Flat mesh traversal: LoadAllGeometry and per-fragment GetGeometry
+- XLSX-Report (optional mit Hervorhebung)
+- JSON-Metadaten (GUID-Listen je Regel)
+- CSV-Listen je Regel
 
-Applies an optional 4×4 transform matrix if present (handles common property names like matrix, transformMatrix, coordinationMatrix).
+Regeln können als JSON oder YAML importiert werden.
+Ideal für QA/QC-Prüfungen in BIM-Prozessen.
 
-Area (XY footprint): sums projected triangle areas (triangleArea2D) on the XY plane via footprintAreaXY.
+---
 
-Volume: computes a signed-tetrahedron volume over all indexed triangles via meshVolume (absolute value / 6).
+## 🎨 BIM X – SmartViews / BCSV Builder
 
-Returns { area, volume } only when positive (>0).
+Verarbeitet die Ausgabe des Rule Validators (GUID-Listen) und erstellt eine BIMcollab SmartViews (.bcsv)-Datei.
+In BIMcollab importieren → fehlerhafte Objekte automatisch isolieren und einfärben.
+Farben und Isolate-Flags frei definierbar.
 
-Rounding is done only on output (internal calculations remain high precision).
+👉 Empfohlene Kette: Rule Validator → BCSV Builder → BIMcollab.
 
-## 🔍 Property collection details
+---
 
-For every IfcSpace, the node adds:
+## 👀 BIM X – Watch
 
-GlobalId, Name, LongName
+Zeigt Daten in einem kompakten HTML-Report (Tabelle + Diagramme) an.
+Ideal für schnelle visuelle Prüfungen in n8n ohne manuellen Export.
 
-IFC Psets values (either all, or only those listed under Extra Parameters)
+---
 
-Area, Volume from quantities or geometry (per the options)
+## 💡 Warum TSV (Tab-getrennt) statt CSV?
 
-Renamed keys applied at the end
+IFC-Daten enthalten oft Kommas – entweder als Dezimaltrennzeichen (deutsche Lokalisierung) oder in Textfeldern ("Raum 1, EG").
+TSV vermeidet Trennzeichen-Konflikte und Importprobleme.
 
-Defensive parsing: gracefully handles missing props/quantities/geometry fragments and continues.
+TSV-Dateien können direkt in Excel geöffnet werden:
+Daten → Text/CSV importieren → Trennzeichen: Tab
 
-## ✅ Example recipes
+---
 
-Fix “room number in Name”: add Rename → Name → RoomNumber.
+## ⚙️ Beispiel-Workflow
 
-Always trust geometry over potentially stale quantities: Force Geometry = ON.
+| Schritt | Node | Einstellung |
+|------|------|----------|
+| 1 | Read Binary File | → data |
+| 2 | BIM X – IFC Space QTO | `binaryProperty = data`<br>Generate XLSX = true<br>Dezimalstellen = 2<br>Geometrie-Fallback = true |
+| 3 | Write Binary File | → `spaces_qto.xlsx` |
 
-Prefer quantities, but fill gaps: Use Geometry Fallback = ON, Force Geometry = OFF.
+(Optional) Versand über SharePoint / E-Mail.
 
-Include only specific fields: All Parameters = OFF, list desired keys in Extra Parameters.
-
-Full dump for AI: All Parameters = ON (+ XLSX).
-
-## 🧯 Errors & edge cases
-
-If the binary property is missing or empty, the node throws a NodeOperationError.
-
-When there are no IfcSpace instances, outputs json.count = 0 and empty files where applicable.
-
-Geometry APIs differ slightly by web-ifc version; the implementation tries both low-level and flat-mesh paths and releases geometry if supported.
- 
-## 📦 Build & runtime notes
-
-Uses web-ifc WASM. In Node, we do not set a custom WASM path; IfcAPI.Init() is called before opening the model.
-
-XLSX creation via xlsx library (XLSX.utils.json_to_sheet, XLSX.write).
-
-TSV writer builds headers from the first row and writes tab-separated lines (UTF-8).
-
-## 🗺️ Field reference (common)
-
-Typical columns you’ll see:
-
-GlobalId, Name, LongName
-
-Area, Volume
-
-Any properties from IFC Psets you requested (via All Parameters or Extra Parameters)
-
-Any renamed keys you configured
-
-## 🧪 Quick test workflow
-
-Read Binary File → data
-
-BIM X – IFC Space QTO
-
-binaryProperty = data
-
-Generate XLSX = true
-
-Round Decimals = 2
-
-Options → Use Geometry Fallback = true
-
-Write Binary File → spaces_qto.xlsx
-
-License & Support
-
-Created by BIM X Consulting.
-
-For support, workshops, or enterprise requests (automation, AI, BIM data): bim-x-consulting.de
-
-
-
-# n8n-nodes-bimx-ifc-qto (DE)
-
-Binary IFC → XLSX/TSV mit Fläche/Volumen für IfcSpace, auf Basis von web-ifc (WASM).
-Input: Binary-Property (Standard data)
-Output: xlsx und/oder tsv in item.binary + json.count.
-
-## ✨ Was der Node macht
-
-Liest eine IFC-Datei aus einem binary-Feld des Items.
-
-Extrahiert IfcSpace-Zeilen und erzeugt eine Tabelle (XLSX/TSV).
-
-Liefert Fläche und Volumen entweder aus den IFC-Quantities oder – als Fallback/Forced – über eine Geometrieberechnung aus den Meshes.
-
-Kann beliebige IFC-Eigenschaften ausgeben (alle oder gezielt).
-
-Benennt Attribute um (z. B. Name → RoomNumber).
-
-Rundet Zahlenwerte auf die gewünschte Nachkommastelle.
-
-Läuft lokal und in self-hosted n8n.
+---
 
 ## 🧩 Installation
 
-In n8n: Settings → Community Nodes → Install → Suche
-n8n-nodes-bimx-ifc-qto
+In n8n:
+Settings → Community Nodes → Install → suche nach n8n-nodes-bimx-ifc-qto
 
-## ▶️ Verwendung (Minimalbeispiel)
 
-Read Binary File (IFC) → Property data
+---
 
-BIM X – IFC Space QTO (binaryProperty = data)
+## 🧠 Technische Hinweise
 
-Write Binary File (XLSX/TSV) oder weiterleiten (SharePoint/E-Mail)
+web-ifc (WASM) Backend – IfcAPI.Init() automatisch geladen, kein manueller Pfad nötig
+Excel-Export via xlsx / exceljs
+TSV-Writer manuell implementiert (UTF-8, Tab-getrennt, Dezimalkomma-Option)
+Kompatibel mit self-hosted n8n
+Produktiv getestet von BIM X Consulting
 
-## ⚙️ Parameter (wie im UI)
-Basis
 
-Binary Property (string) – Name des Binary-Felds mit der IFC (Standard data).
+---
 
-Generate XLSX (boolean) – erzeugt spaces_qto.xlsx im Binary.
+## ☕ Unterstütze das Projekt
 
-Generate TSV (comma decimal) (boolean) – erzeugt spaces_qto.tsv (Tab-getrennt; Dezimal-Komma).
+Wenn dir diese Tools helfen, freue ich mich über eine kleine Spende ☕
+👉 PayPal – Daniel Glober / BIM X Consulting
 
-Round Decimals (number) – Rundung für numerische Ausgabewerte.
+<p align="center"> <a href="https://www.paypal.me/danielglober"> <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png" width="80" alt="PayPal" /> </a> <br/> <img src="https://raw.githubusercontent.com/bimxconsulting-ops/n8n-nodes-bimx-ifc-qto/main/docs/paypal_qr.png" width="180" alt="PayPal QR Code" /> </p>
 
-Options (Sammlung)
+💬 Jede Tasse Kaffee hilft, weitere Automatisierungstools für die BIM-Community zu entwickeln!
 
-All Parameters (boolean)
-Wenn an, werden alle Eigenschaften des IfcSpace aus Psets (IFCPROPERTYSET / IFCPROPERTYSINGLEVALUE) in die Zeile aufgenommen.
+---
 
-Use Geometry Fallback (boolean)
-Wenn an und Fläche/Volumen fehlen in den Quantities, werden sie aus der Geometrie berechnet.
+## 🧾 Lizenz
 
-Force Geometry (boolean)
-Wenn an, werden Fläche/Volumen immer aus der Geometrie berechnet und etwaige Quantity-Werte überschrieben.
-
-Extra Parameters (mehrfach)
-Liste von Eigenschaftsnamen, die zusätzlich aufgenommen werden sollen (wenn man nicht alle möchte).
-
-Rename (mehrfach)
-Paare { parameterName, newName }. Existiert der Schlüssel in der Zeile, wird er nach newName kopiert (alter Schlüssel wird entfernt, wenn Namen unterschiedlich sind).
-Beispiel: Name → RoomNumber.
-
-## 📤 Ausgabe
-
-Pro verarbeitetem Item:
-
-json.count – Anzahl der erzeugten IfcSpace-Zeilen.
-
-binary:
-
-xlsx (optional) – Excel mit Sheet Spaces.
-
-tsv (optional) – Tab-getrennte Datei mit Kopfzeile (Dezimal-Komma Stil).
-
-## 🧠 Wie Fläche & Volumen berechnet werden
-
-IFC-Quantities lesen
-
-Traversiert IfcRelDefinesByProperties und findet:
-
-IFCELEMENTQUANTITY → IFCQUANTITYAREA, IFCQUANTITYVOLUME
-
-IFCPROPERTYSET → IFCPROPERTYSINGLEVALUE (allgemeine Eigenschaften)
-
-Wenn Werte vorhanden sind (und Force Geometry aus), werden sie direkt verwendet.
-
-Berechnung aus Geometrie (bei Use Geometry Fallback oder Force Geometry)
-
-Lädt die Geometrie des jeweiligen IfcSpace über zwei robuste Pfade:
-
-Low-level GetGeometry → GetIndexArray / GetVertexArray
-
-Flat-Mesh via LoadAllGeometry und pro Fragment GetGeometry
-
-Berücksichtigt ggf. eine 4×4 Transformationsmatrix (unter bekannten Schlüsseln wie matrix, transformMatrix, coordinationMatrix).
-
-Fläche (XY-Fußabdruck): Summe der projizierten Dreiecksflächen (triangleArea2D) über footprintAreaXY.
-
-Volumen: Signed-Tetrahedron-Verfahren über alle Dreiecke mittels meshVolume (Betrag / 6).
-
-Gibt { area, volume } nur zurück, wenn Werte > 0 sind.
-
-Die Rundung erfolgt nur auf der Ausgabe.
-
-## 🔍 Details zur Eigenschaftserfassung
-
-Pro IfcSpace:
-
-GlobalId, Name, LongName
-
-Pset-Werte (alle oder gezielt über Extra Parameters)
-
-Area, Volume aus Quantities oder Geometrie (gemäß Optionen)
-
-Rename wird am Ende angewendet
-
-Robuste, defensive Verarbeitung – fehlende Eigenschaften/Geometrie führen nicht zum Abbruch.
-
-## ✅ Anwendungs-Rezepte
-
-„Raumnummer steht in Name“: Rename → Name → RoomNumber.
-
-Geometrie ist maßgeblich: Force Geometry = AN.
-
-Quantities bevorzugen, Lücken füllen: Use Geometry Fallback = AN, Force Geometry = AUS.
-
-Nur bestimmte Felder: All Parameters = AUS, gewünschte Keys in Extra Parameters.
-
-Voller Dump für KI/Dashboards: All Parameters = AN (+ XLSX).
-
-## 🧯 Fehler & Spezialfälle
-
-Fehlendes Binary (IFC) → NodeOperationError.
-
-Keine IfcSpace gefunden → json.count = 0, leere Datei(en) sofern generiert.
-
-Unterschiede zwischen web-ifc-Versionen werden abgefangen (zwei Geometriepfade, optionales ReleaseGeometry).
-
-## 📦 Build & Laufzeit
-
-web-ifc (WASM) – IfcAPI.Init() wird in Node aufgerufen; kein manuelles SetWasmPath.
-
-XLSX über xlsx-Lib (json_to_sheet, write).
-
-TSV wird manuell erzeugt (Tab-getrennt, UTF-8).
-
-## 🗺️ Häufige Spalten
-
-GlobalId, Name, LongName, Area, Volume, gewünschte Pset-Eigenschaften, umbenannte Keys.
-
-## 🧪 Schnelltest
-
-Read Binary File → data
-
-BIM X – IFC Space QTO
-
-binaryProperty = data
-
-Generate XLSX = true
-
-Round Decimals = 2
-
-Options → Use Geometry Fallback = true
-
-Write Binary File → spaces_qto.xlsx
+MIT License
+© BIM X Consulting – Daniel Glober
+🌐 www.bim-x-consulting.de
