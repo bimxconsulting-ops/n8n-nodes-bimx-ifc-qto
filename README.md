@@ -108,7 +108,12 @@ In n8n: Settings → Community Nodes → Install → search for n8n-nodes-bimx-i
 If these tools help you, consider buying me a coffee ☕
 👉 PayPal – Daniel Glober / BIM X Consulting
 
-<p align="center"> <a href="https://www.paypal.me/danielglober"> <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png" width="80" alt="PayPal" /> </a> <br/> <img src="https://raw.githubusercontent.com/bimxconsulting-ops/n8n-nodes-bimx-ifc-qto/main/docs/paypal_qr.png" width="180" alt="PayPal QR Code" /> </p>
+<p align="center">
+  <a href="https://www.paypal.com/paypalme/danielglober" target="_blank">
+    <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png" width="80" alt="PayPal" />
+  </a>
+</p>
+
 
 💬 Every cup of coffee helps develop more automation tools for the BIM community!
 
@@ -123,7 +128,7 @@ MIT License
 ---
 
 
-🇩🇪 Deutsche Übersetzung
+## 🇩🇪 Deutsche Übersetzung
 
 Binäre IFC → XLSX/TSV (Fläche/Volumen für IfcSpace) — basiert auf web-ifc (WASM).
 Eine Sammlung von n8n Community Nodes für IFC-Extraktion, Reporting und Validierung:
@@ -244,7 +249,12 @@ Produktiv getestet von BIM X Consulting
 Wenn dir diese Tools helfen, freue ich mich über eine kleine Spende ☕
 👉 PayPal – Daniel Glober / BIM X Consulting
 
-<p align="center"> <a href="https://www.paypal.me/danielglober"> <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png" width="80" alt="PayPal" /> </a> <br/> <img src="https://raw.githubusercontent.com/bimxconsulting-ops/n8n-nodes-bimx-ifc-qto/main/docs/paypal_qr.png" width="180" alt="PayPal QR Code" /> </p>
+<p align="center">
+  <a href="https://www.paypal.com/paypalme/danielglober" target="_blank">
+    <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png" width="80" alt="PayPal" />
+  </a>
+</p>
+
 
 💬 Jede Tasse Kaffee hilft, weitere Automatisierungstools für die BIM-Community zu entwickeln!
 
