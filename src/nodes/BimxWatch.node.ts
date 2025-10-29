@@ -218,26 +218,30 @@ export class BimxWatch implements INodeType {
     }
 
     // ---- group counts (for chart) ----
-    const pickGroupKey = (): string => {
-      if (groupBy && rows[0] && groupBy in rows[0]) return groupBy;
-      // auto-pick: first string-like column
-      const keys = Object.keys(rows[0] || {});
-      for (const k of keys) {
-        const v = (rows[0] as any)[k];
-        if (typeof v === 'string') return k;
-      }
-      return keys[0] || '';
-    };
-    const groupKey = totalRows > 0 ? pickGroupKey() : '';
+    const norm = (s?: string) => (s ?? '').toLowerCase().trim();
 
-    const groupCounts: Record<string, number> = {};
-    if (groupKey) {
-      for (const r of rows) {
-        const raw = (r as any)[groupKey];
-        const key = (raw === null || raw === undefined || raw === '') ? '(empty)' : String(raw);
-        groupCounts[key] = (groupCounts[key] || 0) + 1;
-      }
-    }
+const pickGroupKey = (): string => {
+  if (!totalRows) return '';
+
+  // alle Keys aus allen Zeilen sammeln
+  const allKeys = new Set<string>();
+  for (const r of rows) Object.keys(r).forEach(k => allKeys.add(k));
+
+  // wenn groupBy gesetzt: erst exact (normiert), dann Teiltreffer versuchen
+  if (groupBy) {
+    const exact = [...allKeys].find(k => norm(k) === norm(groupBy));
+    if (exact) return exact;
+    const partial = [...allKeys].find(k => norm(k).includes(norm(groupBy)));
+    if (partial) return partial;
+  }
+
+  // Auto-Pick: erste String-Spalte
+  const sample = rows.find(r => r && Object.keys(r).length) || rows[0];
+  const keys = Object.keys(sample || {});
+  for (const k of keys) if (typeof (sample as any)[k] === 'string') return k;
+  return keys[0] || '';
+};
+
 
     // ---- meta json for output 2 ----
     const meta: any = {
