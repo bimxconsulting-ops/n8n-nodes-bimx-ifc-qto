@@ -20,7 +20,12 @@ function inferType(v: any): string {
   return typeof v;
 }
 
-function toPlainObject(o: any, maxDepth = 2, prefix = '', out: Record<string, any> = {}) {
+function toPlainObject(
+  o: any,
+  maxDepth = 2,
+  prefix = '',
+  out: Record<string, any> = {},
+) {
   if (o == null || typeof o !== 'object' || maxDepth < 0) {
     out[prefix || 'value'] = o;
     return out;
@@ -51,7 +56,8 @@ export class BimxWatch implements INodeType {
     icon: 'file:BIMX.svg',
     group: ['transform'],
     version: 1,
-    description: 'Schneller Datenblick: Vorschau, Schema, optionale HTML-Übersicht',
+    description:
+      'Schneller Datenblick: Vorschau, Schema, optionale HTML-Übersicht',
     defaults: { name: 'BIM X – Watch' },
     inputs: ['main'],
     outputs: ['main', 'main'],
@@ -136,7 +142,10 @@ export class BimxWatch implements INodeType {
     const items = this.getInputData();
 
     // ---- parameters (with safe defaults) ----
-    const sampleMode = this.getNodeParameter('sampleMode', 0) as 'firstN' | 'lastN' | 'randomN';
+    const sampleMode = this.getNodeParameter('sampleMode', 0) as
+      | 'firstN'
+      | 'lastN'
+      | 'randomN';
     const sampleSize = this.getNodeParameter('sampleSize', 0) as number;
     const maxStringLen = this.getNodeParameter('maxStringLen', 0) as number;
     const inferTypesFlag = this.getNodeParameter('inferTypes', 0) as boolean;
@@ -147,7 +156,11 @@ export class BimxWatch implements INodeType {
     // IMPORTANT: provide defaults even if property is hidden
     const groupBy = this.getNodeParameter('groupBy', 0, '') as string;
     const tableLimit = this.getNodeParameter('tableLimit', 0, 200) as number;
-    const reportTitle = this.getNodeParameter('reportTitle', 0, 'BIM X – Watch Preview') as string;
+    const reportTitle = this.getNodeParameter(
+      'reportTitle',
+      0,
+      'BIM X – Watch Preview',
+    ) as string;
 
     // ---- derive row data ----
     // case A: one item with json.rows (array)
@@ -191,7 +204,10 @@ export class BimxWatch implements INodeType {
     });
 
     // ---- schema + fill rate ----
-    const schema: Record<string, { types: Record<string, number>; nulls: number; uniques: number }> = {};
+    const schema: Record<
+      string,
+      { types: Record<string, number>; nulls: number; uniques: number }
+    > = {};
     const fillRate: Record<string, number> = {};
     if (includeSchema && totalRows > 0) {
       const allKeys = new Set<string>();
@@ -209,7 +225,8 @@ export class BimxWatch implements INodeType {
             filled++;
             const t = inferTypesFlag ? inferType(v) : typeof v;
             typesCount[t] = (typesCount[t] || 0) + 1;
-            if (['string', 'number', 'boolean'].includes(typeof v)) seen.add(String(v));
+            if (['string', 'number', 'boolean'].includes(typeof v))
+              seen.add(String(v));
           }
         }
         schema[k] = { types: typesCount, nulls, uniques: seen.size };
@@ -220,28 +237,40 @@ export class BimxWatch implements INodeType {
     // ---- group counts (for chart) ----
     const norm = (s?: string) => (s ?? '').toLowerCase().trim();
 
-const pickGroupKey = (): string => {
-  if (!totalRows) return '';
+    const pickGroupKey = (): string => {
+      if (!totalRows) return '';
 
-  // alle Keys aus allen Zeilen sammeln
-  const allKeys = new Set<string>();
-  for (const r of rows) Object.keys(r).forEach(k => allKeys.add(k));
+      // Alle Keys aus allen Zeilen sammeln
+      const allKeys = new Set<string>();
+      for (const r of rows) Object.keys(r).forEach((k) => allKeys.add(k));
 
-  // wenn groupBy gesetzt: erst exact (normiert), dann Teiltreffer versuchen
-  if (groupBy) {
-    const exact = [...allKeys].find(k => norm(k) === norm(groupBy));
-    if (exact) return exact;
-    const partial = [...allKeys].find(k => norm(k).includes(norm(groupBy)));
-    if (partial) return partial;
-  }
+      // Wenn groupBy gesetzt: erst exact (normiert), dann Teiltreffer versuchen
+      if (groupBy) {
+        const exact = [...allKeys].find((k) => norm(k) === norm(groupBy));
+        if (exact) return exact;
+        const partial = [...allKeys].find((k) =>
+          norm(k).includes(norm(groupBy)),
+        );
+        if (partial) return partial;
+      }
 
-  // Auto-Pick: erste String-Spalte
-  const sample = rows.find(r => r && Object.keys(r).length) || rows[0];
-  const keys = Object.keys(sample || {});
-  for (const k of keys) if (typeof (sample as any)[k] === 'string') return k;
-  return keys[0] || '';
-};
+      // Auto-Pick: erste String-Spalte
+      const sample = rows.find((r) => r && Object.keys(r).length) || rows[0];
+      const keys = Object.keys(sample || {});
+      for (const k of keys) if (typeof (sample as any)[k] === 'string') return k;
+      return keys[0] || '';
+    };
 
+    const groupKey = totalRows > 0 ? pickGroupKey() : '';
+    const groupCounts: Record<string, number> = {};
+    if (groupKey) {
+      for (const r of rows) {
+        const raw = (r as any)[groupKey];
+        const key =
+          raw === null || raw === undefined || raw === '' ? '(empty)' : String(raw);
+        groupCounts[key] = (groupCounts[key] || 0) + 1;
+      }
+    }
 
     // ---- meta json for output 2 ----
     const meta: any = {
@@ -274,17 +303,16 @@ const pickGroupKey = (): string => {
 
       // small HTML (no images, pure client-side chart.js)
       const tableHead = `<tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr>`;
-      const tableBody =
-        limited
-          .map((row) => {
-            const tds = cols.map((c) => {
-              const v = row[c];
-              if (v === null || v === undefined) return '<td></td>';
-              return `<td>${String(v).replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' } as any)[m])}</td>`;
-            });
-            return `<tr>${tds.join('')}</tr>`;
-          })
-          .join('');
+      const tableBody = limited
+        .map((row) => {
+          const tds = cols.map((c) => {
+            const v = (row as any)[c];
+            if (v === null || v === undefined) return '<td></td>';
+            return `<td>${String(v).replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' } as any)[m])}</td>`;
+          });
+          return `<tr>${tds.join('')}</tr>`;
+        })
+        .join('');
 
       const html = `<!doctype html>
 <html lang="de">
@@ -439,8 +467,8 @@ const pickGroupKey = (): string => {
 
       const buf = Buffer.from(html, 'utf8');
       const bin = await this.helpers.prepareBinaryData(buf);
-      bin.fileName = 'bimx_watch_preview.html';
-      bin.mimeType = 'text/html';
+      (bin as any).fileName = 'bimx_watch_preview.html';
+      (bin as any).mimeType = 'text/html';
       (out2 as any).binary = { html: bin };
     }
 
