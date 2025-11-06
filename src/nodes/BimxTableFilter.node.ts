@@ -3,9 +3,19 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as XLSX from 'xlsx';
-// exceljs als CommonJS (kompatibel mit n8n)
+
+// n8n Types
+import type {
+  IExecuteFunctions,
+  INodeExecutionData,
+  INodeType,
+  INodeTypeDescription,
+} from 'n8n-workflow';
+
+// exceljs als CommonJS (stabil in CJS-Builds)
 const ExcelJS = require('exceljs');
 
+/** ---------------------- Filter-Engine (dein Code) ---------------------- **/
 type Logic = 'AND' | 'OR';
 type Op = 'eq'|'neq'|'contains'|'notContains'|'gt'|'gte'|'lt'|'lte'|'regex';
 interface FilterRule { field: string; op: Op; value: any; }
@@ -49,7 +59,7 @@ function rowMatches(row: Record<string, any>, rules: (FilterRule & { _re?: RegEx
 
 /**
  * Filtert ein XLSX (Buffer) chunked und schreibt ein neues XLSX als Stream.
- * - sehr niedriger RAM-Peak
+ * - niedriger RAM-Peak
  * - gibt Pfad und Metadaten zurück
  */
 export async function filterExcelToXlsxStream(
@@ -57,7 +67,7 @@ export async function filterExcelToXlsxStream(
   sheetNameOrIndex: string | number | undefined,
   rules: FilterRule[],
   logic: Logic = 'AND',
-  wantedColumns?: string[],   // optional: nur diese Spalten in Output
+  wantedColumns?: string[],
   chunkSize = 5000
 ): Promise<{ xlsxPath: string; outRows: number; headers: string[] }> {
   const wbIn = XLSX.read(xlsxBuffer, { type: 'buffer' });
@@ -84,20 +94,18 @@ export async function filterExcelToXlsxStream(
 
   const compiled = compileRules(rules);
 
-  // Streaming-Writer (sehr wenig Speicher)
   const outPath = path.join(os.tmpdir(), `bimx-filter-${Date.now()}.xlsx`);
   const wbOut = new ExcelJS.stream.xlsx.WorkbookWriter({
     filename: outPath,
     useStyles: false,
-    useSharedStrings: false, // spart RAM (Datei kann minimal größer sein)
+    useSharedStrings: false,
   });
   const wsOut = wbOut.addWorksheet(sheetName || 'Filtered');
 
-  // Header schreiben
   wsOut.addRow(headers).commit();
 
   let outRows = 0;
-  let start = range.s.r + 1; // Daten ab Zeile 2
+  let start = range.s.r + 1;
   const last = range.e.r;
 
   while (start <= last) {
@@ -121,9 +129,166 @@ export async function filterExcelToXlsxStream(
     }
 
     start = end + 1;
-    (global as any).gc?.(); // optional
+    (global as any).gc?.();
   }
 
   await wbOut.commit();
   return { xlsxPath: outPath, outRows, headers };
+}
+/** -------------------- Ende Filter-Engine -------------------- **/
+
+/** ---------------------- n8n Node-Klasse ---------------------- **/
+export class BimxTableFilter implements INodeType {
+  description: INodeTypeDescription = {
+    displayName: 'BIMX Table Filter',
+    name: 'bimxTableFilter',
+    group: ['transform'],
+    version: 1,
+    description: 'Filter large Excel files in memory-safe chunks and output compact XLSX',
+    defaults: { name: 'BIMX Table Filter' },
+    inputs: ['main'],
+    outputs: ['main'],
+    icon: 'file:BIMX.svg',
+    properties: [
+      // Eingangs-Binary Key
+      {
+        displayName: 'Binary Property',
+        name: 'binaryProperty',
+        type: 'string',
+        default: 'xlsx',
+        description: 'Name der Binär-Property, die die Eingabe-XLSX enthält (z.B. "xlsx", "file", "data")',
+      },
+      // Sheet
+      {
+        displayName: 'Sheet',
+        name: 'sheet',
+        type: 'string',
+        default: '',
+        placeholder: 'Sheet-Name oder Index (0)',
+        description: 'Optional: Blattname oder Index; leer = erstes Blatt',
+      },
+      // Regeln
+      {
+        displayName: 'Rules',
+        name: 'rules',
+        type: 'fixedCollection',
+        typeOptions: { multipleValues: true },
+        default: [],
+        options: [
+          {
+            name: 'rule',
+            displayName: 'Rule',
+            values: [
+              { displayName: 'Field', name: 'field', type: 'string', default: '' },
+              {
+                displayName: 'Operator',
+                name: 'op',
+                type: 'options',
+                options: [
+                  { name: 'Equals', value: 'eq' },
+                  { name: 'Not Equals', value: 'neq' },
+                  { name: 'Contains', value: 'contains' },
+                  { name: 'Not Contains', value: 'notContains' },
+                  { name: 'Greater Than', value: 'gt' },
+                  { name: 'Greater or Equal', value: 'gte' },
+                  { name: 'Less Than', value: 'lt' },
+                  { name: 'Less or Equal', value: 'lte' },
+                  { name: 'Regex', value: 'regex' },
+                ],
+                default: 'eq',
+              },
+              { displayName: 'Value', name: 'value', type: 'string', default: '' },
+            ],
+          },
+        ],
+      },
+      // Logik
+      {
+        displayName: 'Logic',
+        name: 'logic',
+        type: 'options',
+        options: [
+          { name: 'AND', value: 'AND' },
+          { name: 'OR', value: 'OR' },
+        ],
+        default: 'AND',
+      },
+      // Output-Spalten
+      {
+        displayName: 'Output Columns',
+        name: 'columns',
+        type: 'string',
+        default: '',
+        placeholder: 'Kommagetrennt: ID,Name,Level',
+        description: 'Nur diese Spalten in der Ausgabe (leer = alle)',
+      },
+      // Chunkgröße (optional)
+      {
+        displayName: 'Chunk Size',
+        name: 'chunkSize',
+        type: 'number',
+        typeOptions: { minValue: 100, maxValue: 50000 },
+        default: 5000,
+        description: 'Zeilen pro Block (RAM/Performance-Tuning)',
+      },
+    ],
+  };
+
+  async execute(this: IExecuteFunctions) {
+    const items = this.getInputData();
+    const out: INodeExecutionData[] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+
+      const binaryKey = this.getNodeParameter('binaryProperty', i, 'xlsx') as string;
+      const sheetParam = this.getNodeParameter('sheet', i, '') as string;
+      const rulesColl = this.getNodeParameter('rules', i, []) as Array<{ rule: FilterRule }>;
+      const logic = this.getNodeParameter('logic', i, 'AND') as Logic;
+      const columnsStr = this.getNodeParameter('columns', i, '') as string;
+      const chunkSize = this.getNodeParameter('chunkSize', i, 5000) as number;
+
+      const rules: FilterRule[] = (rulesColl || [])
+        .map((r) => r?.rule)
+        .filter((r): r is FilterRule => !!r && !!r.field);
+
+      const wantedColumns = columnsStr
+        ? columnsStr.split(',').map(s => s.trim()).filter(Boolean)
+        : undefined;
+
+      const bin = item.binary?.[binaryKey] || item.binary?.file || item.binary?.data;
+      if (!bin) {
+        throw new Error(`Binary property "${binaryKey}" nicht gefunden (verfügbar: ${Object.keys(item.binary || {}).join(', ') || '—'})`);
+      }
+
+      const buf = await this.helpers.getBinaryDataBuffer(item, bin.fileName || 'input.xlsx');
+
+      const sheetNameOrIndex =
+        sheetParam === '' ? undefined :
+        /^\d+$/.test(sheetParam) ? Number(sheetParam) : sheetParam;
+
+      const { xlsxPath, outRows, headers } = await filterExcelToXlsxStream(
+        buf,
+        sheetNameOrIndex,
+        rules,
+        logic,
+        wantedColumns,
+        chunkSize,
+      );
+
+      const xbuf = fs.readFileSync(xlsxPath);
+      const b = await this.helpers.prepareBinaryData(xbuf);
+      b.fileName = 'filtered.xlsx';
+      b.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+      const newItem: INodeExecutionData = {
+        json: { matches: outRows, headers },
+        binary: { [binaryKey]: b },
+      };
+
+      out.push(newItem);
+    }
+
+    return [out];
+  }
 }
