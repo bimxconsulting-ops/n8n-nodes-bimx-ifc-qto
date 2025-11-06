@@ -1,49 +1,82 @@
 {
   "name": "n8n-nodes-bimx-ifc-qto",
-  "version": "1.3.01",
-  "description": "n8n nodes for IFC: Space QTO + Parameter Explorer",
-  "author": "BIM X",
+  "version": "1.3.02",
+  "description": "Custom BIMX IFC Quantity Takeoff nodes for n8n",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/bimxconsulting-ops/n8n-nodes-bimx-ifc-qto.git"
-  },
-  "keywords": ["n8n", "n8n-community-node", "ifc", "web-ifc", "bim", "qto"],
+  "author": "BIM X Consulting",
+  "type": "commonjs",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "files": ["dist/**/*", "README.md", "LICENSE"],
-  "n8n": {
-    "n8nNodesApiVersion": "1",
-    "nodes": [
-      "dist/nodes/BimxIfcSpaceQto.node.js",
-      "dist/nodes/IfcParameterExplorer.node.js",
-      "dist/nodes/BimxIfcAttributeExport.node.js",
-      "dist/nodes/BimxTableFilter.node.js",
-      "dist/nodes/BimxWatch.node.js",
-      "dist/nodes/BimxRuleValidator.node.js",
-      "dist/nodes/BimxBcsvBuilder.node.js"
-    ],
-    "credentials": []
-  },
   "scripts": {
-    "build": "rimraf dist && tsc -p tsconfig.json && node ./scripts/copy-assets.cjs && node ./scripts/copy-wasm.cjs",
-    "prepublishOnly": "npm run build",
-    "pack": "npm run build && npm pack"
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-wasm.cjs",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist/**/*",
+    "nodes/**/*",
+    "credentials/**/*",
+    "package.json",
+    "README.md"
+  ],
+  "keywords": [
+    "n8n-community-node-package",
+    "bimx",
+    "ifc",
+    "qto",
+    "revit",
+    "bim"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
-    "web-ifc": "^0.0.51",
+    "jszip": "^3.10.1",
+    "lodash": "^4.17.21",
+    "web-ifc": "^0.0.47",
     "xlsx": "^0.18.5"
   },
-  "peerDependencies": {
-    "n8n-workflow": ">=1.0.0"
-  },
   "devDependencies": {
-    "@types/node": "^20.11.30",
-    "rimraf": "^5.0.5",
-    "typescript": "^5.4.5"
+    "typescript": "^5.2.2",
+    "@types/node": "^18.17.0"
   },
-  "engines": {
-    "node": ">=18"
+  "n8n": {
+    "nodes": [
+      {
+        "type": "node",
+        "name": "dist/nodes/BimxIfcSpaceQto.node.js",
+        "className": "BimxIfcSpaceQto"
+      },
+      {
+        "type": "node",
+        "name": "dist/nodes/IfcParameterExplorer.node.js",
+        "className": "IfcParameterExplorer"
+      },
+      {
+        "type": "node",
+        "name": "dist/nodes/BimxIfcAttributeExport.node.js",
+        "className": "BimxIfcAttributeExport"
+      },
+      {
+        "type": "node",
+        "name": "dist/nodes/BimxTableFilter.node.js",
+        "className": "BimxTableFilter"
+      },
+      {
+        "type": "node",
+        "name": "dist/nodes/BimxWatch.node.js",
+        "className": "BimxWatch"
+      },
+      {
+        "type": "node",
+        "name": "dist/nodes/BimxRuleValidator.node.js",
+        "className": "BimxRuleValidator"
+      },
+      {
+        "type": "node",
+        "name": "dist/nodes/BimxBcsvBuilder.node.js",
+        "className": "BimxBcsvBuilder"
+      }
+    ],
+    "credentials": []
   }
 }
