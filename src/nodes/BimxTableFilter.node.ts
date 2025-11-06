@@ -1,297 +1,129 @@
 // src/nodes/BimxTableFilter.node.ts
-import type {
-  IExecuteFunctions,
-  INodeExecutionData,
-  INodeType,
-  INodeTypeDescription,
-} from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as XLSX from 'xlsx';
-
-/* ----------------------------- Types & Helpers ----------------------------- */
+// exceljs als CommonJS (kompatibel mit n8n)
+const ExcelJS = require('exceljs');
 
 type Logic = 'AND' | 'OR';
+type Op = 'eq'|'neq'|'contains'|'notContains'|'gt'|'gte'|'lt'|'lte'|'regex';
+interface FilterRule { field: string; op: Op; value: any; }
 
-interface FilterRule {
-  field: string; // z.B. "Storey" oder "Pset_WallCommon.FireRating"
-  op:
-    | 'eq' | 'neq'
-    | 'contains' | 'notContains'
-    | 'gt' | 'gte' | 'lt' | 'lte'
-    | 'regex'
-    | 'isEmpty' | 'isNotEmpty'
-    | 'in' | 'nin';
-  value?: any;
-}
-
-function getByPath(obj: any, path: string) {
-  if (!path) return undefined;
-  return path.split('.').reduce((acc, k) => (acc == null ? acc : acc[k]), obj);
-}
-
-function asNum(x: any): number | undefined {
-  const n = Number(x);
+const asNum = (v: unknown) => {
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
   return Number.isFinite(n) ? n : undefined;
+};
+
+function compileRules(rules: FilterRule[]) {
+  return rules.map(r => r.op === 'regex'
+    ? { ...r, _re: (() => {
+        const m = String(r.value).match(/^\/(.*)\/([gimsuy]*)$/);
+        const [pat, flags] = m ? [m[1], m[2]] : [String(r.value), 'i'];
+        return new RegExp(pat, flags);
+      })() }
+    : r
+  ) as (FilterRule & { _re?: RegExp })[];
 }
 
-export function makePredicate(rules: FilterRule[], logic: Logic) {
-  const safeRules = Array.isArray(rules) ? rules : [];
-  const mode = logic === 'OR' ? 'OR' : 'AND';
+function rowMatches(row: Record<string, any>, rules: (FilterRule & { _re?: RegExp })[], logic: Logic): boolean {
+  const evalRule = (r: FilterRule & { _re?: RegExp }) => {
+    const v = row[r.field];
+    switch (r.op) {
+      case 'eq':  return String(v) === String(r.value);
+      case 'neq': return String(v) !== String(r.value);
+      case 'contains':     return String(v ?? '').includes(String(r.value ?? ''));
+      case 'notContains':  return !String(v ?? '').includes(String(r.value ?? ''));
+      case 'gt':  { const a = asNum(v), b = asNum(r.value); return a!==undefined && b!==undefined && a> b; }
+      case 'gte': { const a = asNum(v), b = asNum(r.value); return a!==undefined && b!==undefined && a>=b; }
+      case 'lt':  { const a = asNum(v), b = asNum(r.value); return a!==undefined && b!==undefined && a< b; }
+      case 'lte': { const a = asNum(v), b = asNum(r.value); return a!==undefined && b!==undefined && a<=b; }
+      case 'regex': return r._re!.test(String(v ?? ''));
+      default: return false;
+    }
+  };
+  if (rules.length === 0) return true;
+  if (logic === 'AND') return rules.every(evalRule);
+  return rules.some(evalRule);
+}
 
-  return (row: any) => {
-    const checks = safeRules.map((r) => {
-      const v = getByPath(row, r.field);
+/**
+ * Filtert ein XLSX (Buffer) chunked und schreibt ein neues XLSX als Stream.
+ * - sehr niedriger RAM-Peak
+ * - gibt Pfad und Metadaten zurück
+ */
+export async function filterExcelToXlsxStream(
+  xlsxBuffer: Buffer,
+  sheetNameOrIndex: string | number | undefined,
+  rules: FilterRule[],
+  logic: Logic = 'AND',
+  wantedColumns?: string[],   // optional: nur diese Spalten in Output
+  chunkSize = 5000
+): Promise<{ xlsxPath: string; outRows: number; headers: string[] }> {
+  const wbIn = XLSX.read(xlsxBuffer, { type: 'buffer' });
 
-      switch (r.op) {
-        case 'eq':  return String(v) === String(r.value);
-        case 'neq': return String(v) !== String(r.value);
+  const sheetName = typeof sheetNameOrIndex === 'number'
+    ? (wbIn.SheetNames[sheetNameOrIndex] ?? wbIn.SheetNames[0])
+    : (sheetNameOrIndex || wbIn.SheetNames[0]);
 
-        case 'contains':     return String(v ?? '').includes(String(r.value ?? ''));
-        case 'notContains':  return !String(v ?? '').includes(String(r.value ?? ''));
+  const wsIn = wbIn.Sheets[sheetName];
+  if (!wsIn) throw new Error(`Sheet "${sheetName}" nicht gefunden.`);
 
-        case 'gt':  { const a = asNum(v), b = asNum(r.value); return a !== undefined && b !== undefined && a >  b; }
-        case 'gte': { const a = asNum(v), b = asNum(r.value); return a !== undefined && b !== undefined && a >= b; }
-        case 'lt':  { const a = asNum(v), b = asNum(r.value); return a !== undefined && b !== undefined && a <  b; }
-        case 'lte': { const a = asNum(v), b = asNum(r.value); return a !== undefined && b !== undefined && a <= b; }
+  const ref = wsIn['!ref'] || XLSX.utils.encode_range(wsIn['!range'] as any ?? { s:{r:0,c:0}, e:{r:0,c:0} });
+  const range = XLSX.utils.decode_range(ref);
 
-        case 'regex':
-          try { return new RegExp(String(r.value ?? ''), 'i').test(String(v ?? '')); }
-          catch { return false; }
+  const headerRow = XLSX.utils.sheet_to_json(wsIn, {
+    header: 1,
+    range: { s:{ r: range.s.r, c: range.s.c }, e:{ r: range.s.r, c: range.e.c } },
+    raw: true
+  }) as any[][];
+  const allHeaders = (headerRow[0] ?? []).map(String);
+  const headers = (wantedColumns && wantedColumns.length)
+    ? allHeaders.filter(h => wantedColumns.includes(h))
+    : allHeaders;
 
-        case 'isEmpty':    return v == null || v === '';
-        case 'isNotEmpty': return !(v == null || v === '');
+  const compiled = compileRules(rules);
 
-        case 'in': {
-          const arr = Array.isArray(r.value)
-            ? r.value
-            : String(r.value ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-          return arr.some((x) => String(x) === String(v));
-        }
+  // Streaming-Writer (sehr wenig Speicher)
+  const outPath = path.join(os.tmpdir(), `bimx-filter-${Date.now()}.xlsx`);
+  const wbOut = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: outPath,
+    useStyles: false,
+    useSharedStrings: false, // spart RAM (Datei kann minimal größer sein)
+  });
+  const wsOut = wbOut.addWorksheet(sheetName || 'Filtered');
 
-        case 'nin': {
-          const arr = Array.isArray(r.value)
-            ? r.value
-            : String(r.value ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-          return !arr.some((x) => String(x) === String(v));
-        }
+  // Header schreiben
+  wsOut.addRow(headers).commit();
 
-        default:
-          return false;
-      }
+  let outRows = 0;
+  let start = range.s.r + 1; // Daten ab Zeile 2
+  const last = range.e.r;
+
+  while (start <= last) {
+    const end = Math.min(start + chunkSize - 1, last);
+
+    const block = XLSX.utils.sheet_to_json<Record<string, any>>(wsIn, {
+      header: allHeaders,
+      range: { s: { r: start, c: range.s.c }, e: { r: end, c: range.e.c } },
+      raw: true,
+      defval: '',
+      blankrows: false,
     });
 
-    return mode === 'AND' ? checks.every(Boolean) : checks.some(Boolean);
-  };
-}
-
-export function loadRowsFromItem(item: INodeExecutionData): any[] {
-  // 1) JSON-Varianten
-  const j = item.json as any;
-  if (Array.isArray(j)) return j;           // direkt Array
-  if (Array.isArray(j?.rows)) return j.rows; // in { rows: [...] }
-
-  // 2) XLSX (binary.xlsx)
-  const bin = item.binary;
-  if (bin?.xlsx?.data) {
-    const buf = Buffer.from(bin.xlsx.data as string, 'base64');
-    const wb = XLSX.read(buf, { type: 'buffer' });
-    const sheetName = wb.SheetNames[0];
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: null }) as any[];
-    return rows;
-  }
-
-  // 3) TSV (binary.tsv)
-  if (bin?.tsv?.data) {
-    const buf = Buffer.from(bin.tsv.data as string, 'base64');
-    const txt = buf.toString('utf8');
-    const lines = txt.split(/\r?\n/).filter((l) => l.length > 0);
-    if (lines.length === 0) return [];
-    const headers = lines[0].split('\t');
-    return lines.slice(1).map((ln) => {
-      const cols = ln.split('\t');
-      const obj: Record<string, any> = {};
-      headers.forEach((h, i) => (obj[h] = cols[i] ?? ''));
-      return obj;
-    });
-  }
-
-  // 4) Fallback: single row
-  if (j && typeof j === 'object' && Object.keys(j).length) return [j];
-
-  return [];
-}
-
-/* --------------------------------- Node ------------------------------------ */
-
-export class BimxTableFilter implements INodeType {
-  description: INodeTypeDescription = {
-    displayName: 'BIM X – Table Filter',
-    name: 'bimxTableFilter',
-    icon: 'file:BIMX.svg',
-    group: ['transform'],
-    version: 1,
-    description:
-      'Filtert Tabellen (JSON, XLSX oder TSV) anhand von Regeln und gibt die gefilterten Zeilen zurück',
-    defaults: { name: 'BIM X – Table Filter' },
-    inputs: ['main'],
-    outputs: ['main'],
-    properties: [
-      {
-        displayName: 'Logic',
-        name: 'logic',
-        type: 'options',
-        options: [
-          { name: 'AND (all rules must match)', value: 'AND' },
-          { name: 'OR (any rule may match)', value: 'OR' },
-        ],
-        default: 'AND',
-      },
-      {
-        displayName: 'Filters',
-        name: 'filters',
-        type: 'fixedCollection',
-        typeOptions: { multipleValues: true },
-        default: {},
-        options: [
-          {
-            name: 'rule',
-            displayName: 'Rule',
-            values: [
-              {
-                displayName: 'Field',
-                name: 'field',
-                type: 'string',
-                default: '',
-                placeholder: 'e.g. Storey or Pset_WallCommon.FireRating',
-                required: true,
-              },
-              {
-                displayName: 'Operator',
-                name: 'op',
-                type: 'options',
-                options: [
-                  { name: 'Equals', value: 'eq' },
-                  { name: 'Not Equals', value: 'neq' },
-                  { name: 'Contains', value: 'contains' },
-                  { name: 'Not Contains', value: 'notContains' },
-                  { name: 'Greater Than', value: 'gt' },
-                  { name: 'Greater or Equal', value: 'gte' },
-                  { name: 'Less Than', value: 'lt' },
-                  { name: 'Less or Equal', value: 'lte' },
-                  { name: 'Regex (case-insensitive)', value: 'regex' },
-                  { name: 'Is Empty', value: 'isEmpty' },
-                  { name: 'Is Not Empty', value: 'isNotEmpty' },
-                  { name: 'In (comma-separated)', value: 'in' },
-                  { name: 'Not In (comma-separated)', value: 'nin' },
-                ],
-                default: 'eq',
-              },
-              {
-                displayName: 'Value',
-                name: 'value',
-                type: 'string',
-                default: '',
-                displayOptions: {
-                  show: {
-                    op: [
-                      'eq',
-                      'neq',
-                      'contains',
-                      'notContains',
-                      'gt',
-                      'gte',
-                      'lt',
-                      'lte',
-                      'regex',
-                      'in',
-                      'nin',
-                    ],
-                  },
-                  hide: {
-                    op: ['isEmpty', 'isNotEmpty'],
-                  },
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        displayName: 'Generate XLSX',
-        name: 'xlsx',
-        type: 'boolean',
-        default: false,
-        description: 'Erzeugt zusätzlich eine Excel-Datei mit dem Filterergebnis (binary.xlsx)',
-      },
-      {
-        displayName: 'Generate TSV',
-        name: 'tsv',
-        type: 'boolean',
-        default: false,
-        description: 'Erzeugt zusätzlich eine TSV-Datei (binary.tsv) mit Tab als Trenner',
-      },
-    ],
-  };
-
-  async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-    const items = this.getInputData();
-    const out: INodeExecutionData[] = [];
-
-    for (let i = 0; i < items.length; i++) {
-      const logic = (this.getNodeParameter('logic', i, 'AND') as Logic) ?? 'AND';
-      const filtersCollection = (this.getNodeParameter('filters', i, {}) as any) ?? {};
-      const wantXlsx = this.getNodeParameter('xlsx', i) as boolean;
-      const wantTsv = this.getNodeParameter('tsv', i) as boolean;
-
-      const rulesRaw = Array.isArray(filtersCollection.rule) ? filtersCollection.rule : [];
-      const rules: FilterRule[] = rulesRaw.map((r: any) => ({
-        field: String(r.field ?? '').trim(),
-        op: r.op,
-        value: r.value,
-      })).filter((r: FilterRule) => r.field && r.op);
-
-      const rows = loadRowsFromItem(items[i]);
-      if (!Array.isArray(rows)) {
-        throw new NodeOperationError(this.getNode(), 'Input could not be parsed into rows', { itemIndex: i });
+    for (const row of block) {
+      if (!row || Object.keys(row).length === 0) continue;
+      if (rowMatches(row, compiled, logic)) {
+        const out = headers.map(h => row[h] ?? '');
+        wsOut.addRow(out).commit();
+        outRows++;
       }
-
-      const pred = makePredicate(rules, logic);
-      const filtered = rows.filter(pred);
-
-      const newItem: INodeExecutionData = {
-        json: { count: filtered.length, rows: filtered },
-        binary: {},
-      };
-
-      // Optional: XLSX
-      if (wantXlsx) {
-        const ws = XLSX.utils.json_to_sheet(filtered);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, 'Filtered');
-        const xbuf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as unknown as Buffer;
-
-        const xbin = await this.helpers.prepareBinaryData(Buffer.from(xbuf));
-        xbin.fileName = 'filtered.xlsx';
-        xbin.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-        (newItem.binary as any)['xlsx'] = xbin;
-      }
-
-      // Optional: TSV
-      if (wantTsv) {
-        const headers = Object.keys(filtered[0] ?? {});
-        const lines = [
-          headers.join('\t'),
-          ...filtered.map(rw => headers.map(h => String(rw[h] ?? '')).join('\t')),
-        ];
-        const tbin = await this.helpers.prepareBinaryData(Buffer.from(lines.join('\n'), 'utf8'));
-        tbin.fileName = 'filtered.tsv';
-        tbin.mimeType = 'text/tab-separated-values';
-        (newItem.binary as any)['tsv'] = tbin;
-      }
-
-      out.push(newItem);
     }
 
-    return [out];
+    start = end + 1;
+    (global as any).gc?.(); // optional
   }
+
+  await wbOut.commit();
+  return { xlsxPath: outPath, outRows, headers };
 }
