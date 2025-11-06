@@ -15,7 +15,7 @@ import type {
 // exceljs als CommonJS (stabil in CJS-Builds)
 const ExcelJS = require('exceljs');
 
-/** ---------------------- Filter-Engine (dein Code) ---------------------- **/
+/** ---------------------- Filter-Engine ---------------------- **/
 type Logic = 'AND' | 'OR';
 type Op = 'eq'|'neq'|'contains'|'notContains'|'gt'|'gte'|'lt'|'lte'|'regex';
 interface FilterRule { field: string; op: Op; value: any; }
@@ -59,8 +59,6 @@ function rowMatches(row: Record<string, any>, rules: (FilterRule & { _re?: RegEx
 
 /**
  * Filtert ein XLSX (Buffer) chunked und schreibt ein neues XLSX als Stream.
- * - niedriger RAM-Peak
- * - gibt Pfad und Metadaten zurück
  */
 export async function filterExcelToXlsxStream(
   xlsxBuffer: Buffer,
@@ -135,7 +133,8 @@ export async function filterExcelToXlsxStream(
   await wbOut.commit();
   return { xlsxPath: outPath, outRows, headers };
 }
-/** -------------------- Ende Filter-Engine -------------------- **/
+/** ---------------------- Ende Filter-Engine ---------------------- **/
+
 
 /** ---------------------- n8n Node-Klasse ---------------------- **/
 export class BimxTableFilter implements INodeType {
@@ -144,21 +143,19 @@ export class BimxTableFilter implements INodeType {
     name: 'bimxTableFilter',
     group: ['transform'],
     version: 1,
-    description: 'Filter large Excel files in memory-safe chunks and output compact XLSX',
+    description: 'Filtert große Excel-Dateien speicherschonend und gibt ein gefiltertes XLSX aus',
     defaults: { name: 'BIMX Table Filter' },
     inputs: ['main'],
     outputs: ['main'],
     icon: 'file:BIMX.svg',
     properties: [
-      // Eingangs-Binary Key
       {
         displayName: 'Binary Property',
         name: 'binaryProperty',
         type: 'string',
         default: 'xlsx',
-        description: 'Name der Binär-Property, die die Eingabe-XLSX enthält (z.B. "xlsx", "file", "data")',
+        description: 'Name der Binär-Property, die die Eingabe-XLSX enthält (z. B. "xlsx", "file", "data")',
       },
-      // Sheet
       {
         displayName: 'Sheet',
         name: 'sheet',
@@ -167,7 +164,6 @@ export class BimxTableFilter implements INodeType {
         placeholder: 'Sheet-Name oder Index (0)',
         description: 'Optional: Blattname oder Index; leer = erstes Blatt',
       },
-      // Regeln
       {
         displayName: 'Rules',
         name: 'rules',
@@ -202,7 +198,6 @@ export class BimxTableFilter implements INodeType {
           },
         ],
       },
-      // Logik
       {
         displayName: 'Logic',
         name: 'logic',
@@ -213,7 +208,6 @@ export class BimxTableFilter implements INodeType {
         ],
         default: 'AND',
       },
-      // Output-Spalten
       {
         displayName: 'Output Columns',
         name: 'columns',
@@ -222,7 +216,6 @@ export class BimxTableFilter implements INodeType {
         placeholder: 'Kommagetrennt: ID,Name,Level',
         description: 'Nur diese Spalten in der Ausgabe (leer = alle)',
       },
-      // Chunkgröße (optional)
       {
         displayName: 'Chunk Size',
         name: 'chunkSize',
@@ -261,7 +254,8 @@ export class BimxTableFilter implements INodeType {
         throw new Error(`Binary property "${binaryKey}" nicht gefunden (verfügbar: ${Object.keys(item.binary || {}).join(', ') || '—'})`);
       }
 
-      const buf = await this.helpers.getBinaryDataBuffer(item, bin.fileName || 'input.xlsx');
+      // KORREKT: Index + Property-Name
+      const buf = await this.helpers.getBinaryDataBuffer(i, binaryKey);
 
       const sheetNameOrIndex =
         sheetParam === '' ? undefined :
@@ -277,9 +271,11 @@ export class BimxTableFilter implements INodeType {
       );
 
       const xbuf = fs.readFileSync(xlsxPath);
-      const b = await this.helpers.prepareBinaryData(xbuf);
-      b.fileName = 'filtered.xlsx';
-      b.mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const b = await this.helpers.prepareBinaryData(
+        xbuf,
+        'filtered.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
 
       const newItem: INodeExecutionData = {
         json: { matches: outRows, headers },
